@@ -2,7 +2,7 @@
 set -euo pipefail
 
 src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-src="$src_dir/main.rs"
+src="$src_dir/src/main.rs"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-overview"
 bin="$cache_dir/tmux-overview"
 lock="$cache_dir/build.lock"
@@ -12,7 +12,7 @@ mkdir -p "$cache_dir"
 
 needs_build() {
   [[ ! -x "$bin" ]] && return 0
-  find "$src_dir" -type f -name '*.rs' -newer "$bin" -print -quit | grep -q .
+  find "$src_dir/src" -type f -name '*.rs' -newer "$bin" -print -quit | grep -q .
 }
 
 build_with_local_rustc() {
@@ -30,7 +30,7 @@ build_with_docker() {
     -v "$cache_dir:/out" \
     -w /src \
     "$image" \
-    rustc -C opt-level=z -C strip=symbols /src/main.rs -o "/out/$(basename "$tmp")"
+    rustc -C opt-level=z -C strip=symbols /src/src/main.rs -o "/out/$(basename "$tmp")"
 }
 
 if needs_build; then

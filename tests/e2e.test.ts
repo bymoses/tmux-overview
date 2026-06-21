@@ -3,20 +3,19 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
-// End-to-end tests for shared/tmux/tmux-overview/main.rs.
+// End-to-end tests for src/main.rs.
 //
 // Run with:
-//   bun test shared/tmux/tmux-overview/e2e.test.ts
-//   bun test shared/tmux/tmux-overview/e2e.test.ts -t startup
+//   bun test tests/e2e.test.ts
+//   bun test tests/e2e.test.ts -t startup
 //
 // The tests drive the overview as a black box inside isolated tmux servers.
 // They pass -S with a per-test socket, set temporary HOME/XDG dirs, and clear
 // TMUX when talking to tmux from the test runner, so the user's live tmux server
 // is never mutated by this suite.
 
-const ROOT_DIR = resolve(import.meta.dir, "../../..");
-const TMUX_DIR = join(ROOT_DIR, "shared/tmux");
-const SRC = join(TMUX_DIR, "tmux-overview/main.rs");
+const REPO_DIR = resolve(import.meta.dir, "..");
+const SRC = join(REPO_DIR, "src/main.rs");
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "tmux-overview-e2e."));
 const BUILD_DIR = join(TMP_ROOT, "build");
 const BIN = join(BUILD_DIR, "tmux-overview");
@@ -81,7 +80,7 @@ function buildOverview(): void {
     "run",
     "--rm",
     "-v",
-    `${TMUX_DIR}:/src:ro`,
+    `${REPO_DIR}:/src:ro`,
     "-v",
     `${BUILD_DIR}:/out`,
     "-w",
@@ -90,7 +89,7 @@ function buildOverview(): void {
     "rustc",
     "-C",
     "debuginfo=0",
-    "/src/tmux-overview/main.rs",
+    "/src/src/main.rs",
     "-o",
     "/out/tmux-overview",
   ]);
