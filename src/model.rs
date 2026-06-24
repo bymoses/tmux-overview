@@ -10,6 +10,7 @@ pub(crate) struct Session {
     pub(crate) name: String,
     pub(crate) current: bool,
     pub(crate) saved_label: Option<String>,
+    pub(crate) default_path: String,
     pub(crate) stats: ProcStats,
 }
 
@@ -52,6 +53,8 @@ pub(crate) struct SavedSession {
 
 #[derive(Clone)]
 pub(crate) enum Row {
+    WatchHeader,
+    WatchWindow(Window),
     Session(Session),
     Window(Window),
     SavedSession(SavedSession),
@@ -70,6 +73,11 @@ pub(crate) enum InputAction {
     RenameWindow { target: String, old_name: String },
     RenameSavedSession { old_name: String },
     SetDefaultPath { target: String, name: String },
+    AddTarget {
+        session_target: Option<String>,
+        session_name: Option<String>,
+        cwd: String,
+    },
 }
 
 #[derive(Clone)]

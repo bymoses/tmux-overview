@@ -10,7 +10,9 @@ A small rustc-only tmux session/window overview popup.
 - Live pane-title/window labels.
 - Preview pane with multi-pane layout rendering.
 - Save, restore, rename, delete, and kill session/window flows.
-- Persisted session fold state.
+- Add windows/sessions from the popup (`a`, then `name` for a window or `s:name` for a session).
+- Watchlist section for pinned windows (`w` toggles the selected window).
+- Persisted session fold state and cursor position.
 - No Cargo project required; builds directly with `rustc`, falling back to Docker.
 
 ## Prerequisites

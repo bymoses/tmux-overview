@@ -28,6 +28,13 @@ pub(crate) fn format_mem(stats: &ProcStats) -> String {
 }
 pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String, String, String, Vec<String>, bool) {
     match row {
+        Row::WatchHeader => (
+            "󰈈  watchlist".to_string(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            false,
+        ),
         Row::Session(s) => {
             let arrow = if session_expanded(row, expanded) { "▾" } else { "▸" };
             let mut name = if s.current {
@@ -38,12 +45,27 @@ pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String,
             if let Some(saved_label) = &s.saved_label {
                 name.push_str(&format!("\x1b[38;5;240m 󰆓 {}\x1b[1;38;5;252m", saved_label));
             }
+            let right = if s.default_path.is_empty() {
+                Vec::new()
+            } else {
+                vec![format!("path {}", s.default_path)]
+            };
             (
                 format!("{}  {}", arrow, name),
                 format_cpu(&s.stats),
                 format_mem(&s.stats),
-                Vec::new(),
+                right,
                 false,
+            )
+        }
+        Row::WatchWindow(w) => {
+            let dot = if w.active { "●" } else { "○" };
+            (
+                format!("   {}  {}:{}  {}", dot, w.session_name, w.index, w.name),
+                format_cpu(&w.stats),
+                format_mem(&w.stats),
+                w.pane_labels.clone(),
+                true,
             )
         }
         Row::Window(w) => {
@@ -93,8 +115,8 @@ pub(crate) fn cumulative_session_stats(rows: &[Row]) -> ProcStats {
 pub(crate) fn row_stats(row: &Row) -> ProcStats {
     match row {
         Row::Session(s) => s.stats.clone(),
-        Row::Window(w) => w.stats.clone(),
-        Row::SavedSession(_) => ProcStats::default(),
+        Row::WatchWindow(w) | Row::Window(w) => w.stats.clone(),
+        Row::WatchHeader | Row::SavedSession(_) => ProcStats::default(),
     }
 }
 
@@ -121,6 +143,8 @@ pub(crate) fn help_modal() -> Modal {
             "h/l or arrows fold/unfold".to_string(),
             "space toggle session fold".to_string(),
             "v preview, +/- resize".to_string(),
+            "a add window/session".to_string(),
+            "w watch/unwatch window".to_string(),
             "r rename, R reload".to_string(),
             "S save layout".to_string(),
             "K kill session".to_string(),
@@ -139,13 +163,19 @@ pub(crate) fn modal_lines(modal: &Modal) -> Option<Vec<String>> {
             String::new(),
             "y/enter confirm    n/esc cancel".to_string(),
         ]),
-        Modal::Input { title, value, .. } => Some(vec![
-            title.clone(),
-            String::new(),
-            format!("> {}█", value),
-            String::new(),
-            "enter apply    esc cancel".to_string(),
-        ]),
+        Modal::Input { title, value, action } => {
+            let help = match action {
+                crate::model::InputAction::SetDefaultPath { .. } => "tab complete path    enter apply    esc cancel",
+                _ => "enter apply    esc cancel",
+            };
+            Some(vec![
+                title.clone(),
+                String::new(),
+                format!("> {}█", value),
+                String::new(),
+                help.to_string(),
+            ])
+        }
         Modal::Info { title, lines } => {
             let mut out = vec![title.clone(), String::new()];
             out.extend(lines.iter().cloned());
@@ -211,13 +241,21 @@ pub(crate) fn row_text(row: &Row, expanded: &HashMap<String, bool>, item_width: 
 
     if pane_labels.is_empty() {
         format!("{}{}  {}", item, pad, stats)
-    } else {
+    } else if is_window {
         format!(
             "{}{}  {}\x1b[38;5;244m   {}",
             item,
             pad,
             stats,
             pane_columns(&pane_labels)
+        )
+    } else {
+        format!(
+            "{}{}  {}\x1b[38;5;240m   {}",
+            item,
+            pad,
+            stats,
+            pane_labels.join("  ")
         )
     }
 }
@@ -261,9 +299,12 @@ pub(crate) fn render(
         "h/l fold".to_string(),
         "+/- resize".to_string(),
         "v preview".to_string(),
+        "a add".to_string(),
+        "w watch".to_string(),
         "r rename".to_string(),
         "R reload".to_string(),
         "S save layout".to_string(),
+        "a add window/session".to_string(),
         "K kill session".to_string(),
         "D delete row".to_string(),
         "c path".to_string(),
@@ -271,7 +312,13 @@ pub(crate) fn render(
         "q quit".to_string(),
     ];
     let mut out = String::new();
-    out.push_str("\x1b[H\x1b[2J");
+    // Ask terminals that support synchronized output (Ghostty, iTerm2,
+    // kitty, recent VTE, etc.) to present this full frame atomically.
+    // Do not clear the whole screen on every frame: modal typing/renaming can
+    // make tmux popups briefly show the cleared screen. Each rendered row uses
+    // EL (\x1b[K), so repainting from home is enough to erase the previous
+    // frame without a blank intermediate frame.
+    out.push_str("\x1b[?2026h\x1b[H");
 
     let mut offset = 0usize;
     if selected >= list_h {
@@ -294,8 +341,9 @@ pub(crate) fn render(
                 out.push_str("\x1b[0m");
             } else {
                 match rows[idx] {
+                    Row::WatchHeader => out.push_str("\x1b[1;38;5;240m "),
                     Row::Session(_) => out.push_str("\x1b[1;38;5;252m "),
-                    Row::Window(_) => out.push_str("\x1b[38;5;244m "),
+                    Row::WatchWindow(_) | Row::Window(_) => out.push_str("\x1b[38;5;244m "),
                     Row::SavedSession(_) => out.push_str("\x1b[38;5;240m "),
                 }
                 out.push_str(&visible_truncate_ansi(&text, content_w));
@@ -352,6 +400,7 @@ pub(crate) fn render(
     }
 
     draw_modal(&mut out, modal, h, w);
+    out.push_str("\x1b[?2026l");
     print!("{}", out);
     io::stdout().flush()
 }

@@ -175,7 +175,8 @@ pub(crate) fn active_window_for_session(session_id: &str) -> Option<String> {
 
 pub(crate) fn preview_for_row(row: &Row, width: usize, height: usize) -> Vec<String> {
     match row {
-        Row::Window(w) => {
+        Row::WatchHeader => Vec::new(),
+        Row::WatchWindow(w) | Row::Window(w) => {
             if let Some(lines) = window_layout_preview(&w.id, width, height) {
                 return lines;
             }

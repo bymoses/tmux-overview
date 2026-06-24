@@ -8,12 +8,20 @@ use std::time::Duration;
 use crate::actions::handle_modal_key;
 use crate::model::{Modal, ModalKeyResult, ProcStats, Row, Session};
 use crate::render::{help_modal, render};
-use crate::rows::{default_path_modal_for, delete_modal_for, kill_session_modal_for, load_rows, reload_rows_into, reload_saved_rows_clamped, rename_modal_for, row_target, selected_index_for_current_window};
+use crate::rows::{add_modal_for, clamp_selected, default_path_modal_for, delete_modal_for, first_selectable, is_selectable, kill_session_modal_for, last_selectable, load_rows, reload_rows_into, reload_saved_rows_clamped, rename_modal_for, row_key, row_target, selectable_after, selectable_before, selected_index_for_current_window, selected_index_for_key};
 use crate::saved::{load_saved_sessions, restore_saved_session, save_session_snapshot};
-use crate::state::{load_expanded_state, save_expanded_state};
+use crate::state::{load_cursor_key, load_expanded_state, load_watchlist_state, save_cursor_key, save_expanded_state, save_watchlist_state};
 use crate::stats::{collect_proc_stats, collect_window_labels};
 use crate::terminal::{read_key_timeout, TerminalGuard};
 use crate::tmux_api::tmux_status_ignore;
+
+fn save_selected_cursor(rows: &[Row], selected: usize) {
+    if let Some(row) = rows.get(selected) {
+        if is_selectable(row) {
+            save_cursor_key(&row_key(row));
+        }
+    }
+}
 
 pub(crate) fn run() -> io::Result<()> {
     if env::var("TMUX").is_err() {
@@ -28,6 +36,7 @@ pub(crate) fn run() -> io::Result<()> {
 
     let _guard = TerminalGuard::enter()?;
     let mut expanded = load_expanded_state();
+    let mut watchlist = load_watchlist_state();
     let mut preview_percent = env::var("TMUX_OVERVIEW_PREVIEW_PERCENT")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
@@ -67,31 +76,37 @@ pub(crate) fn run() -> io::Result<()> {
     let mut window_stats: HashMap<String, ProcStats> = HashMap::new();
     let mut window_labels = collect_window_labels();
     let mut saved_sessions = load_saved_sessions();
-    let mut rows = load_rows(&expanded, &session_stats, &window_stats, &window_labels, &saved_sessions);
-    let mut selected = selected_index_for_current_window(&rows);
+    let mut rows = load_rows(&expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+    let mut selected = load_cursor_key()
+        .and_then(|key| selected_index_for_key(&rows, &key))
+        .unwrap_or_else(|| selected_index_for_current_window(&rows));
+    clamp_selected(&mut selected, &rows);
+    save_selected_cursor(&rows, selected);
     let mut dirty = true;
 
     loop {
         while let Ok((new_session_stats, new_window_stats)) = stats_rx.try_recv() {
             session_stats = new_session_stats;
             window_stats = new_window_stats;
-            reload_rows_into(&mut rows, &expanded, &session_stats, &window_stats, &window_labels, &saved_sessions);
+            reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
             dirty = true;
         }
         while let Ok(new_window_labels) = labels_rx.try_recv() {
             if new_window_labels != window_labels {
                 window_labels = new_window_labels;
-                reload_rows_into(&mut rows, &expanded, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
                 dirty = true;
             }
         }
 
-        if selected >= rows.len() {
-            selected = rows.len().saturating_sub(1);
+        let before_clamp = selected;
+        clamp_selected(&mut selected, &rows);
+        if selected != before_clamp {
             dirty = true;
         }
 
         if dirty {
+            save_selected_cursor(&rows, selected);
             render(
                 &rows,
                 selected,
@@ -118,6 +133,7 @@ pub(crate) fn run() -> io::Result<()> {
                         &mut rows,
                         &mut selected,
                         &expanded,
+                        &watchlist,
                         &session_stats,
                         &window_stats,
                         &window_labels,
@@ -133,21 +149,25 @@ pub(crate) fn run() -> io::Result<()> {
         match key.as_slice() {
             b"q" | [3] | [0x1b, b'f'] => break,
             b"j" | [0x1b, b'[', b'B'] => {
-                if selected + 1 < rows.len() {
-                    selected += 1;
+                let next = selectable_after(&rows, selected);
+                if next != selected {
+                    selected = next;
                     dirty = true;
                 }
             }
             b"k" | [0x1b, b'[', b'A'] => {
-                selected = selected.saturating_sub(1);
-                dirty = true;
+                let prev = selectable_before(&rows, selected);
+                if prev != selected {
+                    selected = prev;
+                    dirty = true;
+                }
             }
             b"g" => {
-                selected = 0;
+                selected = first_selectable(&rows);
                 dirty = true;
             }
             b"G" => {
-                selected = rows.len().saturating_sub(1);
+                selected = last_selectable(&rows);
                 dirty = true;
             }
             b" " => {
@@ -155,7 +175,7 @@ pub(crate) fn run() -> io::Result<()> {
                     let now = *expanded.get(&s.name).unwrap_or(&true);
                     expanded.insert(s.name.clone(), !now);
                     save_expanded_state(&expanded);
-                    reload_rows_into(&mut rows, &expanded, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
                     dirty = true;
                 }
             }
@@ -163,24 +183,25 @@ pub(crate) fn run() -> io::Result<()> {
                 if let Some(Row::Session(s)) = rows.get(selected) {
                     expanded.insert(s.name.clone(), true);
                     save_expanded_state(&expanded);
-                    reload_rows_into(&mut rows, &expanded, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
                     dirty = true;
                 }
             }
             b"h" | [0x1b, b'[', b'D'] => {
                 let collapse_session = rows.get(selected).and_then(|row| match row {
                     Row::Session(s) => Some(s.name.clone()),
-                    Row::Window(w) => Some(w.session_name.clone()),
-                    Row::SavedSession(_) => None,
+                    Row::WatchWindow(w) | Row::Window(w) => Some(w.session_name.clone()),
+                    Row::WatchHeader | Row::SavedSession(_) => None,
                 });
                 if let Some(session_name) = collapse_session {
                     expanded.insert(session_name.clone(), false);
                     save_expanded_state(&expanded);
-                    reload_rows_into(&mut rows, &expanded, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
                     selected = rows
                         .iter()
                         .position(|row| matches!(row, Row::Session(s) if s.name == session_name))
                         .unwrap_or(selected.min(rows.len().saturating_sub(1)));
+                    clamp_selected(&mut selected, &rows);
                     dirty = true;
                 }
             }
@@ -200,17 +221,45 @@ pub(crate) fn run() -> io::Result<()> {
                 modal = help_modal();
                 dirty = true;
             }
+            b"a" => {
+                if let Some(row) = rows.get(selected) {
+                    modal = add_modal_for(row);
+                    dirty = true;
+                }
+            }
+            b"w" => {
+                if let Some(row) = rows.get(selected) {
+                    let window = match row {
+                        Row::WatchWindow(w) | Row::Window(w) => Some(w.clone()),
+                        _ => None,
+                    };
+                    if let Some(window) = window {
+                        if watchlist.remove(&window.id) {
+                            message = format!("removed watch {}:{}", window.index, window.name);
+                        } else {
+                            watchlist.insert(window.id.clone());
+                            message = format!("watching {}:{}", window.index, window.name);
+                        }
+                        save_watchlist_state(&watchlist);
+                        crate::rows::reload_rows_clamped(&mut rows, &mut selected, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                    } else {
+                        message = String::from("select a window to watch");
+                    }
+                    dirty = true;
+                }
+            }
             b"S" => {
                 let session_to_save = rows.get(selected).and_then(|row| match row {
                     Row::Session(s) => Some(s.clone()),
-                    Row::Window(w) => Some(Session {
+                    Row::WatchWindow(w) | Row::Window(w) => Some(Session {
                         id: w.session_id.clone(),
                         name: w.session_name.clone(),
                         current: false,
                         saved_label: None,
+                        default_path: String::new(),
                         stats: ProcStats::default(),
                     }),
-                    Row::SavedSession(_) => None,
+                    Row::WatchHeader | Row::SavedSession(_) => None,
                 });
                 if let Some(session) = session_to_save {
                     match save_session_snapshot(&session) {
@@ -220,6 +269,7 @@ pub(crate) fn run() -> io::Result<()> {
                                 &mut rows,
                                 &mut selected,
                                 &expanded,
+                                &watchlist,
                                 &session_stats,
                                 &window_stats,
                                 &window_labels,
@@ -246,6 +296,7 @@ pub(crate) fn run() -> io::Result<()> {
                     &mut rows,
                     &mut selected,
                     &expanded,
+                    &watchlist,
                     &session_stats,
                     &window_stats,
                     &window_labels,
@@ -279,6 +330,7 @@ pub(crate) fn run() -> io::Result<()> {
             b"\r" | b"\n" => {
                 if let Some(row) = rows.get(selected) {
                     match row {
+                        Row::WatchHeader => {}
                         Row::SavedSession(saved) => match restore_saved_session(&saved) {
                             Ok(()) => break,
                             Err(e) => {

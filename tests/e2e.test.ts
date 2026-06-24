@@ -218,6 +218,15 @@ class Fixture {
     expect(sent.exitCode, sent.stderr).toBe(0);
   }
 
+  async selectPreviewText(text: string, maxSteps = 40): Promise<void> {
+    for (let i = 0; i <= maxSteps; i++) {
+      if (this.runnerContains(text)) return;
+      this.sendRunnerKey("j");
+      await sleep(80);
+    }
+    this.fail(`could not select preview text ${text}`);
+  }
+
   async launchOverview(): Promise<void> {
     const cmd = [
       "env",
@@ -356,6 +365,71 @@ e2e("navigation, preview resize, and preview toggle", async () => {
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("add modal creates windows and sessions", async () => {
+  await withFixture("add", async (f) => {
+    const session = `alpha_add_${process.pid}`;
+    const windowName = `new_window_${process.pid}`;
+    const sessionName = `new_session_${process.pid}`;
+    const defaultPath = join(f.testTmp, "add-default-path");
+    mkdirSync(defaultPath, { recursive: true });
+    await f.createSessionWithOutput(session, "main", "ADD_BASE_PREVIEW");
+    expect(f.tmux(["set-option", "-t", session, "@overview_default_path", defaultPath]).exitCode).toBe(0);
+
+    await f.launchOverview();
+    f.sendRunnerKey("g");
+    await f.waitUntil("add base session visible", () => f.runnerContains(session));
+
+    f.sendRunnerKey("a");
+    await f.waitUntil("add modal", () => f.runnerContains("window name, or s:name"));
+    f.sendRunnerLiteral(windowName);
+    f.sendRunnerKey("C-m");
+    await f.waitUntil("new window listed", () => f.windowNames(session).includes(windowName));
+    await f.waitUntil("new window visible", () => f.runnerContains(windowName) && f.runnerLacks("enter apply"));
+    const newWindowPath = f.tmux(["display-message", "-p", "-t", `${session}:${windowName}`, "#{pane_current_path}"]).stdout.trim();
+    expect(newWindowPath).toBe(defaultPath);
+    expect(f.captureRunner()).toContain("path ");
+
+    f.sendRunnerKey("a");
+    await f.waitUntil("second add modal", () => f.runnerContains("add"));
+    f.sendRunnerLiteral(`s:${sessionName}`);
+    f.sendRunnerKey("C-m");
+    await f.waitUntil("new session exists", () => f.tmux(["has-session", "-t", sessionName]).exitCode === 0);
+    await f.waitUntil("new session visible", () => f.runnerContains(sessionName));
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("watchlist and cursor position persist across overview invocations", async () => {
+  await withFixture("watch_cursor", async (f) => {
+    const session = `alpha_watch_${process.pid}`;
+    const first = `main_watch_${process.pid}`;
+    const second = `second_watch_${process.pid}`;
+    await f.createSessionWithOutput(session, first, "WATCH_FIRST_PREVIEW");
+    expect(f.tmux(["new-window", "-d", "-t", session, "-n", second, "-c", f.testTmp, "/bin/sh"]).exitCode).toBe(0);
+    f.tmux(["send-keys", "-l", "-t", `${session}:${second}.0`, `printf '%s\\n' 'WATCH_SECOND_PREVIEW'`]);
+    f.tmux(["send-keys", "-t", `${session}:${second}.0`, "C-m"]);
+    await f.waitUntil("second pane output", () => f.paneContains(`${session}:${second}.0`, "WATCH_SECOND_PREVIEW"), 3_000);
+    const secondId = f.tmux(["display-message", "-p", "-t", `${session}:${second}`, "#{window_id}"]).stdout.trim();
+    const cursorFile = join(f.cache, "tmux-overview", "cursor");
+
+    await f.launchOverview();
+    f.sendRunnerKey("g");
+    await f.waitUntil("cursor moved to first session", () => existsSync(cursorFile) && readFileSync(cursorFile, "utf8").startsWith("session\t"));
+    f.sendRunnerKey("j");
+    await f.waitUntil("cursor moved to first window", () => existsSync(cursorFile) && readFileSync(cursorFile, "utf8").startsWith("window\t"));
+    f.sendRunnerKey("j");
+    await f.waitUntil("second window row selected", () => existsSync(cursorFile) && readFileSync(cursorFile, "utf8").includes(secondId));
+    f.sendRunnerKey("w");
+    await f.waitUntil("watchlist visible", () => f.runnerContains("watchlist") && f.runnerContains(second));
+    expect(readFileSync(cursorFile, "utf8")).toContain(secondId);
+    expect(readFileSync(join(f.cache, "tmux-overview", "watchlist.tsv"), "utf8").trim()).not.toBe("");
+    f.sendRunnerKey("q");
+    await f.waitUntil("overview quit after watch", () => f.runnerLacks("tmux overview"));
+
+    await f.launchOverview();
+    await f.waitUntil("watch cursor restored", () => f.runnerContains("watchlist") && f.runnerContains(second));
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("expand/collapse state persists across overview invocations", async () => {
   await withFixture("fold", async (f) => {
     const session = `alpha_fold_${process.pid}`;
@@ -416,6 +490,24 @@ e2e("saved session snapshots can be restored", async () => {
     expect(f.windowNames(session)).toContain(first);
     expect(f.windowNames(session)).toContain(second);
     expect(f.tmux(["show-option", "-qv", "-t", session, "@overview_default_path"]).stdout.trim()).toBe(defaultPath);
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("default path modal supports tab completion", async () => {
+  await withFixture("path_tab", async (f) => {
+    const session = `alpha_path_${process.pid}`;
+    const suggested = join(f.testTmp, "suggested-dir");
+    mkdirSync(suggested, { recursive: true });
+    await f.createSessionWithOutput(session, "main", "PATH_TAB_CONTENT");
+    expect(f.tmux(["set-option", "-t", session, "@overview_default_path", join(f.testTmp, "sug")]).exitCode).toBe(0);
+
+    await f.launchOverview();
+    f.sendRunnerKey("g", "c");
+    await f.waitUntil("path modal", () => f.runnerContains("tab complete path"));
+    f.sendRunnerKey("Tab");
+    await f.waitUntil("path completed", () => f.runnerContains("suggested-dir/"));
+    f.sendRunnerKey("C-m");
+    await f.waitUntil("path persisted", () => f.tmux(["show-option", "-qv", "-t", session, "@overview_default_path"]).stdout.trim() === `${suggested}/`);
   });
 }, TEST_TIMEOUT_MS);
 
