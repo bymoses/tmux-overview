@@ -22,6 +22,47 @@ pub(crate) fn cursor_path() -> Option<PathBuf> {
     Some(cache_dir()?.join("cursor"))
 }
 
+fn boolean_state_path(name: &str) -> Option<PathBuf> {
+    Some(cache_dir()?.join(name))
+}
+
+fn load_boolean_state(name: &str, default: bool) -> bool {
+    let Some(path) = boolean_state_path(name) else {
+        return default;
+    };
+    match fs::read_to_string(path).ok().as_deref().map(str::trim) {
+        Some("1" | "true" | "on") => true,
+        Some("0" | "false" | "off") => false,
+        _ => default,
+    }
+}
+
+fn save_boolean_state(name: &str, value: bool) {
+    let Some(path) = boolean_state_path(name) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, if value { "1\n" } else { "0\n" });
+}
+
+pub(crate) fn load_show_stats_state() -> bool {
+    load_boolean_state("show-stats", true)
+}
+
+pub(crate) fn save_show_stats_state(value: bool) {
+    save_boolean_state("show-stats", value);
+}
+
+pub(crate) fn load_show_hidden_state() -> bool {
+    load_boolean_state("show-hidden", false)
+}
+
+pub(crate) fn save_show_hidden_state(value: bool) {
+    save_boolean_state("show-hidden", value);
+}
+
 pub(crate) fn load_expanded_state() -> HashMap<String, bool> {
     let Some(path) = state_path() else {
         return HashMap::new();

@@ -34,7 +34,7 @@ docker run --rm \
 bun test tests/e2e.test.ts
 ```
 
-The e2e suite requires `bun`, `tmux`, and either `rustc` or `docker`.
+The e2e suite requires `bun`, `tmux`, and either `rustc` or `docker`. Local `rustc` is not guaranteed to be installed on the host; use the Docker command above to build this Rust tool when it is unavailable.
 
 ## Style
 

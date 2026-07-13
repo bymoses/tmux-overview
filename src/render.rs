@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use crate::model::{Modal, ProcStats, Row};
 use crate::preview::preview_for_row;
 use crate::terminal::term_size;
-use crate::util::{plain_truncate, strip_ansi, text_width, visible_truncate_ansi};
+use crate::util::{plain_truncate, session_display_name, strip_ansi, text_width, visible_truncate_ansi};
 
 pub(crate) fn session_expanded(row: &Row, expanded: &HashMap<String, bool>) -> bool {
     match row {
@@ -26,7 +26,11 @@ pub(crate) fn format_mem(stats: &ProcStats) -> String {
         format!("{}K", stats.rss_kb)
     }
 }
-pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String, String, String, Vec<String>, bool) {
+pub(crate) fn row_parts(
+    row: &Row,
+    expanded: &HashMap<String, bool>,
+    show_stats: bool,
+) -> (String, String, String, Vec<String>, bool) {
     match row {
         Row::WatchHeader => (
             "󰈈  watchlist".to_string(),
@@ -38,9 +42,9 @@ pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String,
         Row::Session(s) => {
             let arrow = if session_expanded(row, expanded) { "▾" } else { "▸" };
             let mut name = if s.current {
-                format!("\x1b[38;2;255;100;150m{}\x1b[1;38;5;252m", s.name)
+                format!("\x1b[38;2;255;100;150m{}\x1b[1;38;5;252m", s.display_name)
             } else {
-                s.name.clone()
+                s.display_name.clone()
             };
             if let Some(saved_label) = &s.saved_label {
                 name.push_str(&format!("\x1b[38;5;240m 󰆓 {}\x1b[1;38;5;252m", saved_label));
@@ -51,7 +55,7 @@ pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String,
                 vec![format!("path {}", s.default_path)]
             };
             (
-                format!("{}  {}", arrow, name),
+                format!("{}{}  {}", "  ".repeat(s.depth), arrow, name),
                 format_cpu(&s.stats),
                 format_mem(&s.stats),
                 right,
@@ -59,9 +63,14 @@ pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String,
             )
         }
         Row::WatchWindow(w) => {
-            let dot = if w.active { "●" } else { "○" };
+            let dot = if w.active { "•" } else { " " };
+            let item = if show_stats {
+                format!("   {}  {}:{}  {}", dot, session_display_name(&w.session_name), w.index, w.name)
+            } else {
+                format!("   {}  {}  {}", dot, session_display_name(&w.session_name), w.name)
+            };
             (
-                format!("   {}  {}:{}  {}", dot, w.session_name, w.index, w.name),
+                item,
                 format_cpu(&w.stats),
                 format_mem(&w.stats),
                 w.pane_labels.clone(),
@@ -69,9 +78,14 @@ pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String,
             )
         }
         Row::Window(w) => {
-            let dot = if w.active { "●" } else { "○" };
+            let dot = if w.active { "•" } else { " " };
+            let item = if show_stats {
+                format!("{}   {}  {}: {}", "  ".repeat(w.depth), dot, w.index, w.name)
+            } else {
+                format!("{}   {}  {}", "  ".repeat(w.depth), dot, w.name)
+            };
             (
-                format!("   {}  {}: {}", dot, w.index, w.name),
+                item,
                 format_cpu(&w.stats),
                 format_mem(&w.stats),
                 w.pane_labels.clone(),
@@ -79,7 +93,7 @@ pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String,
             )
         }
         Row::SavedSession(s) => (
-            format!("󰆓  {}", s.name),
+            format!("󰆓  {}", session_display_name(&s.name)),
             String::new(),
             String::new(),
             vec![format!("{} · {} windows", s.saved_label, s.windows.len())],
@@ -87,17 +101,22 @@ pub(crate) fn row_parts(row: &Row, expanded: &HashMap<String, bool>) -> (String,
         ),
     }
 }
-pub(crate) fn compute_item_width(rows: &[Row], expanded: &HashMap<String, bool>, screen_width: usize) -> usize {
+pub(crate) fn compute_item_width(
+    rows: &[Row],
+    expanded: &HashMap<String, bool>,
+    screen_width: usize,
+    show_stats: bool,
+) -> usize {
     let max_item = rows
         .iter()
-        .map(|row| text_width(&row_parts(row, expanded).0))
+        .map(|row| text_width(&row_parts(row, expanded, show_stats).0))
         .max()
         .unwrap_or(24);
 
-    // Enough room for: two spaces + CPU(7) + space + RAM(6) + optional
-    // command separator. Clamp so one very long tab name does not push stats
-    // across the screen.
-    let max_allowed = screen_width.saturating_sub(24).max(20);
+    // Reserve room for CPU/RAM and the command separator in stats mode.
+    // Compact mode can dedicate nearly the full picker width to names/titles.
+    let reserved = if show_stats { 24 } else { 2 };
+    let max_allowed = screen_width.saturating_sub(reserved).max(20);
     max_item.clamp(20, max_allowed)
 }
 
@@ -143,6 +162,8 @@ pub(crate) fn help_modal() -> Modal {
             "h/l or arrows fold/unfold".to_string(),
             "space toggle session fold".to_string(),
             "v preview, +/- resize".to_string(),
+            "s compact/stats view".to_string(),
+            ". show/hide helpers".to_string(),
             "a add window/session".to_string(),
             "w watch/unwatch window".to_string(),
             "r rename, R reload".to_string(),
@@ -222,10 +243,15 @@ pub(crate) fn draw_modal(out: &mut String, modal: &Modal, term_h: usize, term_w:
     out.push_str("┘\x1b[0m");
 }
 
-pub(crate) fn row_text(row: &Row, expanded: &HashMap<String, bool>, item_width: usize) -> String {
+pub(crate) fn row_text(
+    row: &Row,
+    expanded: &HashMap<String, bool>,
+    item_width: usize,
+    show_stats: bool,
+) -> String {
     let cpu_width = 7usize;
     let mem_width = 6usize;
-    let (item, cpu, mem, pane_labels, is_window) = row_parts(row, expanded);
+    let (item, cpu, mem, pane_labels, is_window) = row_parts(row, expanded, show_stats);
     let item_visible_width = text_width(&item).min(item_width);
     let item = visible_truncate_ansi(&item, item_width);
     let pad = " ".repeat(item_width.saturating_sub(item_visible_width));
@@ -239,7 +265,15 @@ pub(crate) fn row_text(row: &Row, expanded: &HashMap<String, bool>, item_width: 
     let mem_colour = if mem_high { "\x1b[38;2;255;100;150m" } else { "\x1b[38;5;240m" };
     let stats = format!("{}{} {}{}", cpu_colour, cpu_cell, mem_colour, mem_cell);
 
-    if pane_labels.is_empty() {
+    if !show_stats {
+        if pane_labels.is_empty() {
+            format!("{}{}", item, pad)
+        } else if is_window {
+            format!("{}{}\x1b[38;5;244m   {}", item, pad, pane_columns(&pane_labels))
+        } else {
+            format!("{}{}\x1b[38;5;240m   {}", item, pad, pane_labels.join("  "))
+        }
+    } else if pane_labels.is_empty() {
         format!("{}{}  {}", item, pad, stats)
     } else if is_window {
         format!(
@@ -266,6 +300,7 @@ pub(crate) fn render(
     expanded: &HashMap<String, bool>,
     preview_percent: usize,
     show_preview: bool,
+    show_stats: bool,
     stats_interval_secs: u64,
     message: &str,
     modal: &Modal,
@@ -286,12 +321,20 @@ pub(crate) fn render(
     let side_w = if w >= 80 { w / 5 } else { 0 };
     let delim_w = if side_w > 0 { 1 } else { 0 };
     let left_w = w.saturating_sub(side_w + delim_w).max(20);
-    let item_width = compute_item_width(rows, expanded, left_w.saturating_sub(2));
+    let item_width = compute_item_width(rows, expanded, left_w.saturating_sub(2), show_stats);
     let total = cumulative_session_stats(rows);
     let help_lines = vec![
         "tmux overview".to_string(),
-        format!("total {} {}", format_cpu(&total), format_mem(&total)),
-        format!("stats {}s", stats_interval_secs),
+        if show_stats {
+            format!("total {} {}", format_cpu(&total), format_mem(&total))
+        } else {
+            "compact picker".to_string()
+        },
+        if show_stats {
+            format!("stats {}s", stats_interval_secs)
+        } else {
+            "stats hidden".to_string()
+        },
         message.to_string(),
         String::new(),
         "enter switch".to_string(),
@@ -299,12 +342,13 @@ pub(crate) fn render(
         "h/l fold".to_string(),
         "+/- resize".to_string(),
         "v preview".to_string(),
+        "s stats".to_string(),
+        ". hidden".to_string(),
         "a add".to_string(),
         "w watch".to_string(),
         "r rename".to_string(),
         "R reload".to_string(),
         "S save layout".to_string(),
-        "a add window/session".to_string(),
         "K kill session".to_string(),
         "D delete row".to_string(),
         "c path".to_string(),
@@ -320,17 +364,17 @@ pub(crate) fn render(
     // frame without a blank intermediate frame.
     out.push_str("\x1b[?2026h\x1b[H");
 
-    let mut offset = 0usize;
-    if selected >= list_h {
-        offset = selected + 1 - list_h;
-    }
+    // Keep the selected row away from the picker edges when enough rows are
+    // available, similar to a four-line scrolloff in an editor.
+    let scrolloff = 4.min(list_h.saturating_sub(1) / 2);
+    let offset = selected.saturating_sub(list_h.saturating_sub(scrolloff + 1));
     for line_idx in 0..list_h {
         let idx = offset + line_idx;
         if rows.is_empty() && line_idx == 0 {
             out.push_str(" no sessions");
             out.push_str(&" ".repeat(left_w.saturating_sub(12)));
         } else if idx < rows.len() {
-            let text = row_text(&rows[idx], expanded, item_width);
+            let text = row_text(&rows[idx], expanded, item_width, show_stats);
             let content_w = left_w.saturating_sub(1);
             if idx == selected {
                 let plain = plain_truncate(&strip_ansi(&text), content_w);

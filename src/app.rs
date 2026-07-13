@@ -10,7 +10,7 @@ use crate::model::{Modal, ModalKeyResult, ProcStats, Row, Session};
 use crate::render::{help_modal, render};
 use crate::rows::{add_modal_for, clamp_selected, default_path_modal_for, delete_modal_for, first_selectable, is_selectable, kill_session_modal_for, last_selectable, load_rows, reload_rows_into, reload_saved_rows_clamped, rename_modal_for, row_key, row_target, selectable_after, selectable_before, selected_index_for_current_window, selected_index_for_key};
 use crate::saved::{load_saved_sessions, restore_saved_session, save_session_snapshot};
-use crate::state::{load_cursor_key, load_expanded_state, load_watchlist_state, save_cursor_key, save_expanded_state, save_watchlist_state};
+use crate::state::{load_cursor_key, load_expanded_state, load_show_hidden_state, load_show_stats_state, load_watchlist_state, save_cursor_key, save_expanded_state, save_show_hidden_state, save_show_stats_state, save_watchlist_state};
 use crate::stats::{collect_proc_stats, collect_window_labels};
 use crate::terminal::{read_key_timeout, TerminalGuard};
 use crate::tmux_api::tmux_status_ignore;
@@ -53,48 +53,63 @@ pub(crate) fn run() -> io::Result<()> {
         .unwrap_or(100)
         .clamp(50, 5000);
     let mut show_preview = true;
+    let mut show_stats = load_show_stats_state();
+    let mut show_hidden = load_show_hidden_state();
     let mut message = String::from("stats are collected in the background");
     let mut modal = Modal::None;
-
-    let (stats_tx, stats_rx) = mpsc::channel();
-    thread::spawn(move || loop {
-        if stats_tx.send(collect_proc_stats()).is_err() {
-            break;
-        }
-        thread::sleep(Duration::from_secs(stats_interval_secs));
-    });
-
-    let (labels_tx, labels_rx) = mpsc::channel();
-    thread::spawn(move || loop {
-        if labels_tx.send(collect_window_labels()).is_err() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(title_interval_ms));
-    });
 
     let mut session_stats: HashMap<String, ProcStats> = HashMap::new();
     let mut window_stats: HashMap<String, ProcStats> = HashMap::new();
     let mut window_labels = collect_window_labels();
     let mut saved_sessions = load_saved_sessions();
-    let mut rows = load_rows(&expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+    let mut rows = load_rows(
+        &expanded,
+        &watchlist,
+        &session_stats,
+        &window_stats,
+        &window_labels,
+        &saved_sessions,
+        show_hidden,
+    );
     let mut selected = load_cursor_key()
         .and_then(|key| selected_index_for_key(&rows, &key))
         .unwrap_or_else(|| selected_index_for_current_window(&rows));
     clamp_selected(&mut selected, &rows);
     save_selected_cursor(&rows, selected);
-    let mut dirty = true;
 
+    // Do not make the first frame compete with ps or duplicate title queries.
+    // The picker paints immediately with cached/default stats, then refreshes.
+    let (stats_tx, stats_rx) = mpsc::channel();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        loop {
+            if stats_tx.send(collect_proc_stats()).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_secs(stats_interval_secs));
+        }
+    });
+
+    let (labels_tx, labels_rx) = mpsc::channel();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(title_interval_ms));
+        if labels_tx.send(collect_window_labels()).is_err() {
+            break;
+        }
+    });
+
+    let mut dirty = true;
     loop {
         while let Ok((new_session_stats, new_window_stats)) = stats_rx.try_recv() {
             session_stats = new_session_stats;
             window_stats = new_window_stats;
-            reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+            reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
             dirty = true;
         }
         while let Ok(new_window_labels) = labels_rx.try_recv() {
             if new_window_labels != window_labels {
                 window_labels = new_window_labels;
-                reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
                 dirty = true;
             }
         }
@@ -113,6 +128,7 @@ pub(crate) fn run() -> io::Result<()> {
                 &expanded,
                 preview_percent,
                 show_preview,
+                show_stats,
                 stats_interval_secs,
                 &message,
                 &modal,
@@ -137,6 +153,7 @@ pub(crate) fn run() -> io::Result<()> {
                         &session_stats,
                         &window_stats,
                         &window_labels,
+                        show_hidden,
                     );
                     dirty = true;
                 }
@@ -147,7 +164,7 @@ pub(crate) fn run() -> io::Result<()> {
         }
 
         match key.as_slice() {
-            b"q" | [3] | [0x1b, b'f'] => break,
+            b"q" | [3] | [0x1b, b'f'] | [0x1b, b's'] => break,
             b"j" | [0x1b, b'[', b'B'] => {
                 let next = selectable_after(&rows, selected);
                 if next != selected {
@@ -175,7 +192,7 @@ pub(crate) fn run() -> io::Result<()> {
                     let now = *expanded.get(&s.name).unwrap_or(&true);
                     expanded.insert(s.name.clone(), !now);
                     save_expanded_state(&expanded);
-                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
                     dirty = true;
                 }
             }
@@ -183,7 +200,7 @@ pub(crate) fn run() -> io::Result<()> {
                 if let Some(Row::Session(s)) = rows.get(selected) {
                     expanded.insert(s.name.clone(), true);
                     save_expanded_state(&expanded);
-                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
                     dirty = true;
                 }
             }
@@ -196,7 +213,7 @@ pub(crate) fn run() -> io::Result<()> {
                 if let Some(session_name) = collapse_session {
                     expanded.insert(session_name.clone(), false);
                     save_expanded_state(&expanded);
-                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
                     selected = rows
                         .iter()
                         .position(|row| matches!(row, Row::Session(s) if s.name == session_name))
@@ -207,6 +224,37 @@ pub(crate) fn run() -> io::Result<()> {
             }
             b"v" => {
                 show_preview = !show_preview;
+                dirty = true;
+            }
+            b"s" => {
+                show_stats = !show_stats;
+                save_show_stats_state(show_stats);
+                message = if show_stats {
+                    String::from("stats view on")
+                } else {
+                    String::from("compact view on")
+                };
+                dirty = true;
+            }
+            b"." => {
+                show_hidden = !show_hidden;
+                save_show_hidden_state(show_hidden);
+                crate::rows::reload_rows_clamped(
+                    &mut rows,
+                    &mut selected,
+                    &expanded,
+                    &watchlist,
+                    &session_stats,
+                    &window_stats,
+                    &window_labels,
+                    &saved_sessions,
+                    show_hidden,
+                );
+                message = if show_hidden {
+                    String::from("hidden sessions visible")
+                } else {
+                    String::from("hidden sessions hidden")
+                };
                 dirty = true;
             }
             b"+" | b"=" => {
@@ -241,7 +289,7 @@ pub(crate) fn run() -> io::Result<()> {
                             message = format!("watching {}:{}", window.index, window.name);
                         }
                         save_watchlist_state(&watchlist);
-                        crate::rows::reload_rows_clamped(&mut rows, &mut selected, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions);
+                        crate::rows::reload_rows_clamped(&mut rows, &mut selected, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
                     } else {
                         message = String::from("select a window to watch");
                     }
@@ -254,6 +302,8 @@ pub(crate) fn run() -> io::Result<()> {
                     Row::WatchWindow(w) | Row::Window(w) => Some(Session {
                         id: w.session_id.clone(),
                         name: w.session_name.clone(),
+                        display_name: w.session_name.clone(),
+                        depth: 0,
                         current: false,
                         saved_label: None,
                         default_path: String::new(),
@@ -273,6 +323,7 @@ pub(crate) fn run() -> io::Result<()> {
                                 &session_stats,
                                 &window_stats,
                                 &window_labels,
+                                show_hidden,
                             );
                             message = format!("saved layout {}", session.name);
                         }
@@ -300,6 +351,7 @@ pub(crate) fn run() -> io::Result<()> {
                     &session_stats,
                     &window_stats,
                     &window_labels,
+                    show_hidden,
                 );
                 message = String::from("refreshed");
                 dirty = true;

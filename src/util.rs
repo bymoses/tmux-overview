@@ -1,6 +1,17 @@
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub(crate) fn session_display_name(name: &str) -> String {
+    name.split('/')
+        .map(|component| match component {
+            "__float" => "◫ float",
+            "__agents" => "󰚩 agents",
+            _ => component,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub(crate) fn hex_encode(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(s.len() * 2);

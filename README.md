@@ -6,10 +6,13 @@ A small rustc-only tmux session/window overview popup.
 
 ## Features
 
-- Lists tmux sessions and windows with CPU/RSS stats.
+- Lists tmux sessions and windows, with `s` toggling CPU/RSS stats.
+- Nests slash-named sessions (`project/worker`) under their live parent session.
+- Hides internal `__` helper sessions until `.` toggles them visible, rendering friendly `◫`/`󰚩` labels.
 - Live pane-title/window labels.
 - Preview pane with multi-pane layout rendering.
 - Save, restore, rename, delete, and kill session/window flows.
+- Renaming a session also renames every slash-named descendant.
 - Add windows/sessions from the popup (`a`, then `name` for a window or `s:name` for a session).
 - Watchlist section for pinned windows (`w` toggles the selected window).
 - Persisted session fold state and cursor position.
@@ -45,9 +48,18 @@ Add a binding to `~/.config/tmux/tmux.conf`:
 
 ```tmux
 bind-key s display-popup -E -w 90% -h 90% -T "overview" "~/.config/tmux/tmux-overview/tmux-overview.sh"
+bind-key -n M-s display-popup -E -w 90% -h 90% -T "overview" "~/.config/tmux/tmux-overview/tmux-overview.sh"
 ```
 
-Reload tmux config, then press prefix + `s`.
+Reload tmux config, then press prefix + `s` or Alt+`s`.
+
+## Session naming and keys
+
+- `parent/child` appears beneath a live `parent` session; each level folds independently.
+- Components beginning with `__` are hidden by default. Press `.` to toggle them; legacy symbol-marked helpers remain recognized.
+- tmux keeps the real names `<session>/__float` and `<session>/__agents`; the overview displays those components as `◫ float` and `󰚩 agents`.
+- Press `s` to toggle compact and CPU/RAM stats views.
+- Hidden-session visibility and stats mode persist across overview openings.
 
 ## Build/run
 

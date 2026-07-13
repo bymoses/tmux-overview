@@ -3,6 +3,75 @@ use std::collections::{HashMap, HashSet};
 use crate::model::{ConfirmAction, InputAction, Modal, ProcStats, Row, SavedSession, Session, Window};
 use crate::saved::load_saved_sessions;
 use crate::tmux_api::tmux;
+use crate::util::session_display_name;
+
+pub(crate) fn session_is_hidden(name: &str) -> bool {
+    name.starts_with("_popup_")
+        || name
+            .split('/')
+            .any(|part| {
+                part.starts_with("__")
+                    || part.starts_with('▣')
+                    || part.starts_with('◫')
+                    || part.starts_with('󰚩')
+                    || part.starts_with('🤖')
+            })
+}
+
+fn nearest_parent_name(name: &str, live_names: &HashSet<String>) -> Option<String> {
+    let mut candidate = name.rsplit_once('/')?.0;
+    loop {
+        if live_names.contains(candidate) {
+            return Some(candidate.to_string());
+        }
+        let Some((parent, _)) = candidate.rsplit_once('/') else {
+            return None;
+        };
+        candidate = parent;
+    }
+}
+
+fn append_session_tree(
+    rows: &mut Vec<Row>,
+    session: &Session,
+    parent_name: Option<&str>,
+    depth: usize,
+    children: &HashMap<String, Vec<Session>>,
+    windows_by_session: &HashMap<String, Vec<Window>>,
+    expanded: &HashMap<String, bool>,
+) {
+    let mut displayed = session.clone();
+    displayed.depth = depth;
+    let raw_display_name = parent_name
+        .and_then(|parent| session.name.strip_prefix(&format!("{}/", parent)))
+        .unwrap_or(&session.name);
+    displayed.display_name = session_display_name(raw_display_name);
+    rows.push(Row::Session(displayed));
+
+    if !*expanded.get(&session.name).unwrap_or(&true) {
+        return;
+    }
+    if let Some(windows) = windows_by_session.get(&session.id) {
+        for window in windows {
+            let mut displayed_window = window.clone();
+            displayed_window.depth = depth;
+            rows.push(Row::Window(displayed_window));
+        }
+    }
+    if let Some(child_sessions) = children.get(&session.name) {
+        for child in child_sessions {
+            append_session_tree(
+                rows,
+                child,
+                Some(&session.name),
+                depth + 1,
+                children,
+                windows_by_session,
+                expanded,
+            );
+        }
+    }
+}
 
 pub(crate) fn load_rows(
     expanded: &HashMap<String, bool>,
@@ -11,6 +80,7 @@ pub(crate) fn load_rows(
     window_stats: &HashMap<String, ProcStats>,
     window_labels: &HashMap<String, Vec<String>>,
     saved_sessions: &[SavedSession],
+    show_hidden: bool,
 ) -> Vec<Row> {
     let current_session = tmux(&["display-message", "-p", "#{session_id}"])
         .unwrap_or_default()
@@ -20,7 +90,7 @@ pub(crate) fn load_rows(
     let sessions_raw = tmux(&[
         "list-sessions",
         "-F",
-        "#{session_id}\t#{session_name}",
+        "#{session_id}\t#{session_name}\t#{@overview_default_path}",
     ])
     .unwrap_or_default();
 
@@ -35,13 +105,14 @@ pub(crate) fn load_rows(
     let mut windows_by_session: HashMap<String, Vec<Window>> = HashMap::new();
     for line in windows_raw.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 6 || parts[1].starts_with("_popup_") {
+        if parts.len() < 6 || (!show_hidden && session_is_hidden(parts[1])) {
             continue;
         }
         let pane_labels = window_labels.get(parts[2]).cloned().unwrap_or_default();
         let w = Window {
             session_id: parts[0].to_string(),
             session_name: parts[1].to_string(),
+            depth: 0,
             id: parts[2].to_string(),
             index: parts[3].to_string(),
             name: parts[4].to_string(),
@@ -68,44 +139,62 @@ pub(crate) fn load_rows(
         }
     }
 
-    let mut live_names: HashSet<String> = HashSet::new();
+    let mut sessions = Vec::new();
+    let mut all_live_names = HashSet::new();
     for line in sessions_raw.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 2 {
             continue;
         }
-        if parts[1].starts_with("_popup_") {
+        all_live_names.insert(parts[1].to_string());
+        if !show_hidden && session_is_hidden(parts[1]) {
             continue;
         }
-        live_names.insert(parts[1].to_string());
         let saved_label = saved_sessions
             .iter()
             .find(|saved| saved.name == parts[1])
             .map(|saved| saved.saved_label.clone());
-        let default_path = tmux(&["show-option", "-qv", "-t", parts[0], "@overview_default_path"])
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let s = Session {
+        let default_path = parts.get(2).copied().unwrap_or_default().trim().to_string();
+        sessions.push(Session {
             id: parts[0].to_string(),
             name: parts[1].to_string(),
+            display_name: parts[1].to_string(),
+            depth: 0,
             current: parts[0] == current_session,
             saved_label,
             default_path,
             stats: session_stats.get(parts[0]).cloned().unwrap_or_default(),
-        };
-        rows.push(Row::Session(s.clone()));
-        if *expanded.get(&s.name).unwrap_or(&true) {
-            if let Some(ws) = windows_by_session.get(&s.id) {
-                for w in ws {
-                    rows.push(Row::Window(w.clone()));
-                }
-            }
+        });
+    }
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let visible_names: HashSet<String> = sessions.iter().map(|session| session.name.clone()).collect();
+    let mut roots = Vec::new();
+    let mut children: HashMap<String, Vec<Session>> = HashMap::new();
+    for session in sessions {
+        if let Some(parent) = nearest_parent_name(&session.name, &visible_names) {
+            children.entry(parent).or_default().push(session);
+        } else {
+            roots.push(session);
         }
+    }
+    for child_sessions in children.values_mut() {
+        child_sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    for session in &roots {
+        append_session_tree(
+            &mut rows,
+            session,
+            None,
+            0,
+            &children,
+            &windows_by_session,
+            expanded,
+        );
     }
 
     for saved in saved_sessions {
-        if !live_names.contains(&saved.name) {
+        if !all_live_names.contains(&saved.name) && (show_hidden || !session_is_hidden(&saved.name)) {
             rows.push(Row::SavedSession(saved.clone()));
         }
     }
@@ -172,8 +261,9 @@ pub(crate) fn reload_rows_into(
     window_stats: &HashMap<String, ProcStats>,
     window_labels: &HashMap<String, Vec<String>>,
     saved_sessions: &[SavedSession],
+    show_hidden: bool,
 ) {
-    *rows = load_rows(expanded, watchlist, session_stats, window_stats, window_labels, saved_sessions);
+    *rows = load_rows(expanded, watchlist, session_stats, window_stats, window_labels, saved_sessions, show_hidden);
 }
 
 pub(crate) fn reload_rows_clamped(
@@ -185,9 +275,10 @@ pub(crate) fn reload_rows_clamped(
     window_stats: &HashMap<String, ProcStats>,
     window_labels: &HashMap<String, Vec<String>>,
     saved_sessions: &[SavedSession],
+    show_hidden: bool,
 ) {
     let key = rows.get(*selected).map(row_key);
-    reload_rows_into(rows, expanded, watchlist, session_stats, window_stats, window_labels, saved_sessions);
+    reload_rows_into(rows, expanded, watchlist, session_stats, window_stats, window_labels, saved_sessions, show_hidden);
     if let Some(key) = key {
         if let Some(idx) = selected_index_for_key(rows, &key) {
             *selected = idx;
@@ -205,9 +296,10 @@ pub(crate) fn reload_saved_rows_clamped(
     session_stats: &HashMap<String, ProcStats>,
     window_stats: &HashMap<String, ProcStats>,
     window_labels: &HashMap<String, Vec<String>>,
+    show_hidden: bool,
 ) {
     *saved_sessions = load_saved_sessions();
-    reload_rows_clamped(rows, selected, expanded, watchlist, session_stats, window_stats, window_labels, saved_sessions);
+    reload_rows_clamped(rows, selected, expanded, watchlist, session_stats, window_stats, window_labels, saved_sessions, show_hidden);
 }
 
 pub(crate) fn row_key(row: &Row) -> String {

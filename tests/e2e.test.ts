@@ -335,6 +335,8 @@ e2e("startup rendering hides _popup_* sessions", async () => {
     expect(screen).toContain(session);
     expect(screen).toContain("main");
     expect(screen).toContain("STARTUP_RENDER_OK");
+    expect(screen).toContain("•");
+    expect(screen).not.toContain("○");
     expect(screen).not.toContain(popup);
     expect(screen).not.toContain("POPUP_SHOULD_BE_HIDDEN");
   });
@@ -362,6 +364,36 @@ e2e("navigation, preview resize, and preview toggle", async () => {
     f.sendRunnerKey("v");
     await f.waitUntil("preview hidden", () => f.runnerLacks("preview 65%"));
     expect(f.captureRunner()).not.toContain("NAV_PREVIEW_CONTENT");
+
+    f.sendRunnerKey("M-s");
+    await f.waitUntil("overview closed by Alt+s", () => f.runnerLacks("tmux overview"));
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("picker keeps a four-row margin around deep selections", async () => {
+  await withFixture("scrolloff", async (f) => {
+    const session = `alpha_scrolloff_${process.pid}`;
+    await f.createSessionWithOutput(session, "window_00", "SCROLLOFF_PREVIEW");
+    for (let i = 1; i < 12; i++) {
+      const name = `window_${String(i).padStart(2, "0")}`;
+      expect(f.tmux(["new-window", "-d", "-t", session, "-n", name, "-c", f.testTmp, "/bin/sh"]).exitCode).toBe(0);
+    }
+    const targetName = "window_08";
+    const targetId = f.tmux(["display-message", "-p", "-t", `${session}:${targetName}`, "#{window_id}"]).stdout.trim();
+    const cursorFile = join(f.cache, "tmux-overview", "cursor");
+
+    await f.launchOverview();
+    f.sendRunnerKey("g");
+    for (let i = 0; i < 9; i++) {
+      f.sendRunnerKey("j");
+      await sleep(30);
+    }
+    await f.waitUntil("deep picker row selected", () =>
+      existsSync(cursorFile) && readFileSync(cursorFile, "utf8").includes(targetId),
+    );
+
+    const selectedLine = f.captureRunner().split("\n").findIndex((line) => line.includes(targetName));
+    expect(selectedLine).toBe(6);
   });
 }, TEST_TIMEOUT_MS);
 
@@ -427,6 +459,120 @@ e2e("watchlist and cursor position persist across overview invocations", async (
 
     await f.launchOverview();
     await f.waitUntil("watch cursor restored", () => f.runnerContains("watchlist") && f.runnerContains(second));
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("slash-named sessions render as independently foldable trees", async () => {
+  await withFixture("nested_sessions", async (f) => {
+    const parent = `alpha_tree_${process.pid}`;
+    const child = `${parent}/child`;
+    const grandchild = `${child}/grandchild`;
+    const parentWindow = `parent_window_${process.pid}`;
+    const childWindow = `child_window_${process.pid}`;
+    const grandchildWindow = `grandchild_window_${process.pid}`;
+    await f.createSessionWithOutput(parent, parentWindow, "PARENT_TREE_PREVIEW");
+    await f.createSessionWithOutput(child, childWindow, "CHILD_TREE_PREVIEW");
+    await f.createSessionWithOutput(grandchild, grandchildWindow, "GRANDCHILD_TREE_PREVIEW");
+
+    await f.launchOverview();
+    f.sendRunnerKey("g");
+    await f.waitUntil("nested sessions visible", () => {
+      const screen = f.captureRunner();
+      return screen.includes(parent) && screen.includes("child") && screen.includes("grandchild");
+    });
+    const expanded = f.captureRunner();
+    expect(expanded.indexOf(parent)).toBeLessThan(expanded.indexOf("child"));
+    expect(expanded.indexOf("child")).toBeLessThan(expanded.indexOf("grandchild"));
+
+    f.sendRunnerKey("h");
+    await f.waitUntil("parent tree collapsed", () => {
+      const screen = f.captureRunner();
+      return !screen.includes(childWindow) && !screen.includes(grandchildWindow);
+    });
+
+    f.sendRunnerKey("l");
+    await f.waitUntil("parent tree expanded again", () => f.runnerContains(childWindow));
+    f.sendRunnerKey("j");
+    await sleep(100);
+    f.sendRunnerKey("j");
+    await f.waitUntil("child session selected", () => f.runnerContains("CHILD_TREE_PREVIEW"));
+    f.sendRunnerKey("h");
+    await f.waitUntil("child tree collapsed independently", () => {
+      const screen = f.captureRunner();
+      return screen.includes(childWindow) === false && screen.includes("grandchild") === false;
+    });
+    expect(f.captureRunner()).toContain("▸  child");
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("helper-symbol visibility persists across overview invocations", async () => {
+  await withFixture("hidden_sessions", async (f) => {
+    const parent = `alpha_visible_${process.pid}`;
+    const floatSession = `${parent}/__float`;
+    const agentSession = `${parent}/__agents`;
+    const hiddenRoot = `__background_${process.pid}`;
+    await f.createSessionWithOutput(parent, "visible", "VISIBLE_SESSION_PREVIEW");
+    await f.createSessionWithOutput(floatSession, "float", "HIDDEN_FLOAT_PREVIEW");
+    await f.createSessionWithOutput(agentSession, "agents", "HIDDEN_AGENT_PREVIEW");
+    await f.createSessionWithOutput(hiddenRoot, "worker", "HIDDEN_ROOT_PREVIEW");
+
+    await f.launchOverview();
+    let screen = f.captureRunner();
+    expect(screen).toContain(parent);
+    expect(screen).not.toContain("◫ float");
+    expect(screen).not.toContain("󰚩 agents");
+    expect(screen).not.toContain(hiddenRoot);
+    expect(screen).not.toContain("HIDDEN_FLOAT_PREVIEW");
+    expect(screen).not.toContain("HIDDEN_AGENT_PREVIEW");
+
+    const stateFile = join(f.cache, "tmux-overview", "show-hidden");
+    f.sendRunnerKey(".");
+    await f.waitUntil("hidden helper sessions visible", () => f.runnerContains("◫ float") && f.runnerContains("󰚩 agents"));
+    expect(f.captureRunner()).not.toContain("__float");
+    expect(f.captureRunner()).not.toContain("__agents");
+    f.sendRunnerKey("g");
+    await f.waitUntil("hidden root session visible", () => f.runnerContains(hiddenRoot));
+    expect(readFileSync(stateFile, "utf8").trim()).toBe("1");
+
+    await f.quitOverview();
+    await f.launchOverview();
+    await f.waitUntil("hidden visibility restored", () =>
+      f.runnerContains("◫ float") && f.runnerContains("󰚩 agents") && f.runnerContains(hiddenRoot),
+    );
+
+    f.sendRunnerKey(".");
+    await f.waitUntil("hidden sessions hidden again", () => {
+      const hidden = f.captureRunner();
+      return !hidden.includes("◫ float") && !hidden.includes("󰚩 agents") && !hidden.includes(hiddenRoot);
+    });
+    expect(readFileSync(stateFile, "utf8").trim()).toBe("0");
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("stats picker mode persists across overview invocations", async () => {
+  await withFixture("stats_toggle", async (f) => {
+    const session = `alpha_stats_${process.pid}`;
+    await f.createSessionWithOutput(session, "main", "STATS_TOGGLE_PREVIEW");
+
+    const stateFile = join(f.cache, "tmux-overview", "show-stats");
+    const currentPicker = () => f.captureRunner().split("\n").slice(0, 11).join("\n");
+    await f.launchOverview();
+    expect(f.captureRunner()).toContain("stats 60s");
+    expect(currentPicker()).toContain("0: main");
+    f.sendRunnerKey("s");
+    await f.waitUntil("compact picker", () => f.runnerContains("compact picker") && f.runnerContains("stats hidden"));
+    expect(currentPicker()).not.toContain("0: main");
+    expect(readFileSync(stateFile, "utf8").trim()).toBe("0");
+
+    await f.quitOverview();
+    await f.launchOverview();
+    await f.waitUntil("compact picker restored", () => f.runnerContains("compact picker") && f.runnerContains("stats hidden"));
+    expect(currentPicker()).not.toContain("0: main");
+
+    f.sendRunnerKey("s");
+    await f.waitUntil("stats picker restored", () => f.runnerContains("stats 60s") && f.runnerContains("stats view on"));
+    expect(currentPicker()).toContain("0: main");
+    expect(readFileSync(stateFile, "utf8").trim()).toBe("1");
   });
 }, TEST_TIMEOUT_MS);
 
@@ -511,6 +657,36 @@ e2e("default path modal supports tab completion", async () => {
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("renaming a session cascades to all slash-named descendants", async () => {
+  await withFixture("rename_tree", async (f) => {
+    const parent = `alpha_rename_tree_${process.pid}`;
+    const child = `${parent}/child`;
+    const grandchild = `${child}/grandchild`;
+    const renamedParent = `${parent}_renamed`;
+    const renamedChild = `${renamedParent}/child`;
+    const renamedGrandchild = `${renamedChild}/grandchild`;
+    await f.createSessionWithOutput(parent, "parent", "RENAME_TREE_PARENT");
+    await f.createSessionWithOutput(child, "child", "RENAME_TREE_CHILD");
+    await f.createSessionWithOutput(grandchild, "grandchild", "RENAME_TREE_GRANDCHILD");
+
+    await f.launchOverview();
+    f.sendRunnerKey("g", "r");
+    await f.waitUntil("tree rename modal", () => f.runnerContains(`rename session ${parent}`));
+    f.sendRunnerLiteral("_renamed");
+    f.sendRunnerKey("C-m");
+
+    await f.waitUntil("renamed session tree exists", () =>
+      f.tmux(["has-session", "-t", `=${renamedParent}`]).exitCode === 0 &&
+      f.tmux(["has-session", "-t", `=${renamedChild}`]).exitCode === 0 &&
+      f.tmux(["has-session", "-t", `=${renamedGrandchild}`]).exitCode === 0,
+    );
+    expect(f.tmux(["has-session", "-t", `=${parent}`]).exitCode).not.toBe(0);
+    expect(f.tmux(["has-session", "-t", `=${child}`]).exitCode).not.toBe(0);
+    expect(f.tmux(["has-session", "-t", `=${grandchild}`]).exitCode).not.toBe(0);
+    await f.waitUntil("renamed tree redrawn", () => f.runnerLacks("enter apply") && f.runnerContains(renamedParent));
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("rename live session modal path", async () => {
   await withFixture("rename_session", async (f) => {
     const session = `alpha_rename_${process.pid}`;
@@ -559,7 +735,7 @@ e2e("rename/delete saved session modal paths", async () => {
     f.sendRunnerKey("C-m");
 
     const newPath = f.savedSessionFile(renamed);
-    await f.waitUntil("renamed saved file", () => existsSync(newPath));
+    await f.waitUntil("renamed saved file", () => existsSync(newPath) && !existsSync(oldPath));
     expect(existsSync(oldPath)).toBe(false);
 
     f.sendRunnerKey("G", "D");

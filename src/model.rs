@@ -8,6 +8,8 @@ pub(crate) struct ProcStats {
 pub(crate) struct Session {
     pub(crate) id: String,
     pub(crate) name: String,
+    pub(crate) display_name: String,
+    pub(crate) depth: usize,
     pub(crate) current: bool,
     pub(crate) saved_label: Option<String>,
     pub(crate) default_path: String,
@@ -18,6 +20,7 @@ pub(crate) struct Session {
 pub(crate) struct Window {
     pub(crate) session_id: String,
     pub(crate) session_name: String,
+    pub(crate) depth: usize,
     pub(crate) id: String,
     pub(crate) index: String,
     pub(crate) name: String,

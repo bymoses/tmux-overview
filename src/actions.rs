@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::model::{ConfirmAction, InputAction, Modal, ModalKeyResult};
 use crate::saved::{delete_saved_session, rename_saved_session};
-use crate::tmux_api::tmux_status_ok;
+use crate::tmux_api::{tmux, tmux_status_ok};
 
 fn expand_home(value: &str) -> String {
     if value == "~" || value.starts_with("~/") {
@@ -122,6 +123,62 @@ pub(crate) fn perform_confirm_action(action: ConfirmAction) -> Result<String, St
     }
 }
 
+fn rename_session_tree(target: &str, old_name: &str, new_name: &str) -> Result<usize, String> {
+    if old_name == new_name {
+        return Ok(0);
+    }
+
+    let sessions_raw = tmux(&["list-sessions", "-F", "#{session_id}\t#{session_name}"])
+        .map_err(|e| e.to_string())?;
+    let descendant_prefix = format!("{}/", old_name);
+    let mut renames: Vec<(String, String, String)> = sessions_raw
+        .lines()
+        .filter_map(|line| {
+            let (id, name) = line.split_once('\t')?;
+            if name == old_name || name.starts_with(&descendant_prefix) {
+                let suffix = &name[old_name.len()..];
+                Some((id.to_string(), name.to_string(), format!("{}{}", new_name, suffix)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !renames.iter().any(|(id, name, _)| id == target && name == old_name) {
+        return Err(format!("session {} no longer exists", old_name));
+    }
+
+    let existing: HashSet<String> = sessions_raw
+        .lines()
+        .filter_map(|line| line.split_once('\t').map(|(_, name)| name.to_string()))
+        .collect();
+    let sources: HashSet<String> = renames.iter().map(|(_, source, _)| source.clone()).collect();
+    let mut destinations = HashSet::new();
+    for (_, _, destination) in &renames {
+        if !destinations.insert(destination.clone()) {
+            return Err(format!("duplicate destination session {}", destination));
+        }
+        if existing.contains(destination) && !sources.contains(destination) {
+            return Err(format!("session {} already exists", destination));
+        }
+    }
+
+    // Descendants move first so renaming a parent into its own namespace does
+    // not collide with a child that is about to move deeper into that tree.
+    renames.sort_by(|a, b| b.1.matches('/').count().cmp(&a.1.matches('/').count()));
+    let mut completed: Vec<(String, String)> = Vec::new();
+    for (id, source, destination) in &renames {
+        if !tmux_status_ok(&["rename-session", "-t", id, destination]) {
+            for (completed_id, original_name) in completed.iter().rev() {
+                let _ = tmux_status_ok(&["rename-session", "-t", completed_id, original_name]);
+            }
+            return Err(format!("failed to rename session {}", source));
+        }
+        completed.push((id.clone(), source.clone()));
+    }
+    Ok(renames.len().saturating_sub(1))
+}
+
 pub(crate) fn perform_input_action(action: InputAction, value: String) -> Result<String, String> {
     let value = value.trim().to_string();
     match action {
@@ -129,10 +186,17 @@ pub(crate) fn perform_input_action(action: InputAction, value: String) -> Result
             if value.is_empty() || value.contains(':') || value.contains('\n') {
                 return Err("invalid session name".to_string());
             }
-            if tmux_status_ok(&["rename-session", "-t", &target, &value]) {
+            let child_count = rename_session_tree(&target, &old_name, &value)?;
+            if child_count == 0 {
                 Ok(format!("renamed {} → {}", old_name, value))
             } else {
-                Err(format!("failed to rename {}", old_name))
+                Ok(format!(
+                    "renamed {} → {} with {} child session{}",
+                    old_name,
+                    value,
+                    child_count,
+                    if child_count == 1 { "" } else { "s" }
+                ))
             }
         }
         InputAction::RenameWindow { target, old_name } => {

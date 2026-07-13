@@ -1,6 +1,6 @@
 use crate::model::{Row, SavedSession};
 use crate::tmux_api::tmux;
-use crate::util::{plain_truncate, text_width, visible_truncate_ansi};
+use crate::util::{plain_truncate, session_display_name, text_width, visible_truncate_ansi};
 
 pub(crate) fn capture_preview(target: &str, lines: usize) -> Vec<String> {
     let start = format!("-{}", lines.saturating_mul(2).max(lines));
@@ -196,7 +196,7 @@ pub(crate) fn preview_for_row(row: &Row, width: usize, height: usize) -> Vec<Str
 }
 pub(crate) fn saved_session_preview(session: &SavedSession, width: usize, height: usize) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(format!("󰆓 saved layout: {}", session.name));
+    lines.push(format!("󰆓 saved layout: {}", session_display_name(&session.name)));
     lines.push(format!("last saved: {}", session.saved_label));
     lines.push(format!("{} windows", session.windows.len()));
     if !session.default_path.is_empty() {
