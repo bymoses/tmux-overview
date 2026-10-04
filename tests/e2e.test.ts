@@ -102,7 +102,8 @@ beforeAll(() => {
     return;
   }
   buildOverview();
-});
+  // The Docker fallback build alone takes ~5s, bun's default hook timeout.
+}, 180_000);
 
 afterAll(() => {
   rmSync(TMP_ROOT, { recursive: true, force: true });
@@ -194,6 +195,12 @@ class Fixture {
 
   captureRunner(): string {
     return this.capturePane(this.runnerPane);
+  }
+
+  captureRunnerAnsi(): string {
+    const captured = this.tmux(["capture-pane", "-p", "-e", "-t", this.runnerPane]);
+    expect(captured.exitCode, captured.stderr).toBe(0);
+    return captured.stdout;
   }
 
   runnerContains(needle: string): boolean {
@@ -335,7 +342,7 @@ e2e("startup rendering hides _popup_* sessions", async () => {
     expect(screen).toContain(session);
     expect(screen).toContain("main");
     expect(screen).toContain("STARTUP_RENDER_OK");
-    expect(screen).toContain("•");
+    expect(screen).toContain("◆");
     expect(screen).not.toContain("○");
     expect(screen).not.toContain(popup);
     expect(screen).not.toContain("POPUP_SHOULD_BE_HIDDEN");
@@ -351,10 +358,18 @@ e2e("navigation, preview resize, and preview toggle", async () => {
     f.sendRunnerKey("g");
     await f.waitUntil("selected session preview", () => f.runnerContains("NAV_PREVIEW_CONTENT"));
 
+    const previewStateFile = join(f.cache, "tmux-overview", "preview-percent");
     f.sendRunnerKey("+");
     await f.waitUntil("preview grows", () => f.runnerContains("preview 70%"));
+    expect(readFileSync(previewStateFile, "utf8").trim()).toBe("70");
+
+    await f.quitOverview();
+    await f.launchOverview();
+    await f.waitUntil("preview size restored", () => f.runnerContains("preview 70%"));
+
     f.sendRunnerKey("-");
     await f.waitUntil("preview shrinks", () => f.runnerContains("preview 65%"));
+    expect(readFileSync(previewStateFile, "utf8").trim()).toBe("65");
     f.sendRunnerKey("?");
     await f.waitUntil("help modal", () => f.runnerContains("tmux overview help"));
     expect(f.captureRunner()).toContain("S save layout");
@@ -483,6 +498,9 @@ e2e("slash-named sessions render as independently foldable trees", async () => {
     const expanded = f.captureRunner();
     expect(expanded.indexOf(parent)).toBeLessThan(expanded.indexOf("child"));
     expect(expanded.indexOf("child")).toBeLessThan(expanded.indexOf("grandchild"));
+    expect(expanded).toContain("├─◆");
+    expect(expanded).toContain("└─ ▾ child");
+    expect(expanded).toContain("└─ ▾ grandchild");
 
     f.sendRunnerKey("h");
     await f.waitUntil("parent tree collapsed", () => {
@@ -501,7 +519,25 @@ e2e("slash-named sessions render as independently foldable trees", async () => {
       const screen = f.captureRunner();
       return screen.includes(childWindow) === false && screen.includes("grandchild") === false;
     });
-    expect(f.captureRunner()).toContain("▸  child");
+    expect(f.captureRunner()).toContain("▸ child");
+
+    const treeStateFile = join(f.cache, "tmux-overview", "show-tree");
+    f.sendRunnerKey("t");
+    await f.waitUntil("tree connectors hidden", () =>
+      f.runnerContains("tree view off") && f.runnerContains("•") && f.runnerLacks("└─ ▸ child"),
+    );
+    expect(readFileSync(treeStateFile, "utf8").trim()).toBe("0");
+
+    await f.quitOverview();
+    await f.launchOverview();
+    expect(f.captureRunner()).toContain("•");
+    expect(f.captureRunner()).not.toContain("└─ ▸ child");
+
+    f.sendRunnerKey("t");
+    await f.waitUntil("tree connectors restored", () =>
+      f.runnerContains("tree view on") && f.runnerContains("◆") && f.runnerContains("└─ ▸ child"),
+    );
+    expect(readFileSync(treeStateFile, "utf8").trim()).toBe("1");
   });
 }, TEST_TIMEOUT_MS);
 
@@ -549,6 +585,54 @@ e2e("helper-symbol visibility persists across overview invocations", async () =>
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("bg helper session starts collapsed even when helpers are shown", async () => {
+  await withFixture("bg_collapsed", async (f) => {
+    const parent = `alpha_bg_${process.pid}`;
+    const bgSession = `${parent}/__bg`;
+    const bgWindow = `bgjob_${process.pid}`;
+    // "zz" sorts after "__bg" by name; bg must still be listed last.
+    const lastByName = `${parent}/zz_child`;
+    await f.createSessionWithOutput(parent, "visible", "BG_PARENT_PREVIEW");
+    await f.createSessionWithOutput(bgSession, bgWindow, "BG_JOB_PREVIEW");
+    await f.createSessionWithOutput(`${parent}/__float`, "float", "BG_FLOAT_PREVIEW");
+    await f.createSessionWithOutput(lastByName, "child", "BG_CHILD_PREVIEW");
+
+    await f.launchOverview();
+    f.sendRunnerKey(".");
+    const bgTitle = "\u{F018D} bg";
+    await f.waitUntil("bg helper session visible", () => f.runnerContains(bgTitle));
+    const screen = f.captureRunner();
+    expect(screen).toContain(`\u25b8 ${bgTitle}`);
+    expect(screen).not.toContain("__bg");
+    expect(screen).not.toContain(bgWindow);
+    expect(screen.indexOf("\u25eb float")).toBeLessThan(screen.indexOf(bgTitle));
+    expect(screen.indexOf("zz_child")).toBeLessThan(screen.indexOf(bgTitle));
+
+    // The title is dim even after the tree connector, which sets its own colour.
+    const bgLine = f.captureRunnerAnsi().split("\n").find((line) => line.includes(bgTitle)) ?? "";
+    const beforeTitle = bgLine.slice(bgLine.lastIndexOf("\u2500"), bgLine.indexOf("\u25b8"));
+    expect(beforeTitle).toContain("38;5;240");
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("watchlist ignores window ids saved by another tmux server", async () => {
+  await withFixture("watch_stale", async (f) => {
+    const session = `alpha_stale_${process.pid}`;
+    await f.createSessionWithOutput(session, "main", "STALE_WATCH_PREVIEW");
+    const ids = f.tmux(["list-windows", "-a", "-F", "#{window_id}"]).stdout.trim().split("\n");
+
+    // Old bare-id format and entries tagged with a different server start time.
+    const stateDir = join(f.cache, "tmux-overview");
+    mkdirSync(stateDir, { recursive: true });
+    const stale = [...ids, ...ids.map((id) => `1\t${id}`)].join("\n");
+    writeFileSync(join(stateDir, "watchlist.tsv"), `${stale}\n`);
+
+    await f.launchOverview();
+    expect(f.captureRunner()).toContain(session);
+    expect(f.captureRunner()).not.toContain("watchlist");
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("stats picker mode persists across overview invocations", async () => {
   await withFixture("stats_toggle", async (f) => {
     const session = `alpha_stats_${process.pid}`;
@@ -590,7 +674,8 @@ e2e("expand/collapse state persists across overview invocations", async () => {
     await f.waitUntil("fold target visible", () => f.runnerContains(session));
     f.sendRunnerKey("h");
     await f.waitUntil("collapsed state persisted", () => existsSync(stateFile) && readFileSync(stateFile, "utf8").includes(`${session}\t0`));
-    f.sendRunnerKey("q");
+    // Wait for the exit: keys typed into a still-running overview are commands.
+    await f.quitOverview();
 
     expect(existsSync(stateFile)).toBe(true);
     expect(readFileSync(stateFile, "utf8")).toContain(`${session}\t0`);
@@ -633,6 +718,11 @@ e2e("saved session snapshots can be restored", async () => {
     await f.launchOverview();
     f.sendRunnerKey("G", "C-m");
     await f.waitUntil("restored session exists", () => f.tmux(["has-session", "-t", session]).exitCode === 0, 5_000);
+    // The session appears first; windows are added after it, then the dummy goes.
+    await f.waitUntil("restored windows created", () => {
+      const names = f.windowNames(session);
+      return names.includes(second) && !names.includes("__restore_dummy__");
+    }, 5_000);
     expect(f.windowNames(session)).toContain(first);
     expect(f.windowNames(session)).toContain(second);
     expect(f.tmux(["show-option", "-qv", "-t", session, "@overview_default_path"]).stdout.trim()).toBe(defaultPath);
@@ -805,6 +895,39 @@ e2e("preview sanitization survives cursor-control output", async () => {
     // tmux may apply destructive controls to the source pane before capture;
     // the invariant here is that rendering that pane does not corrupt the
     // overview's header/list frame.
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("unreviewed agent panes badge their window and roll up to the session", async () => {
+  await withFixture("agent_alert", async (f) => {
+    const session = `alpha_agent_${process.pid}`;
+    const window = `worker_${process.pid}`;
+    await f.createSessionWithOutput(session, window, "AGENT_PANE_OUTPUT");
+
+    // A producer publishes its stop on the pane, then rings the bell. tmux keeps
+    // window_bell_flag set until the window is focused, which is the "not
+    // reviewed yet" half of the signal.
+    const idleAt = Math.floor(Date.now() / 1000) - 120;
+    for (const [name, value] of [
+      ["@agent_kind", "pi"],
+      ["@agent_state", "idle"],
+      ["@agent_idle_at", String(idleAt)],
+    ]) {
+      expect(f.tmux(["set-option", "-p", "-t", `${session}:${window}.0`, name, value]).exitCode).toBe(0);
+    }
+    f.tmux(["send-keys", "-l", "-t", `${session}:${window}.0`, "printf '\\a'"]);
+    f.tmux(["send-keys", "-t", `${session}:${window}.0`, "C-m"]);
+    await f.waitUntil(
+      "bell alert recorded",
+      () => f.tmux(["display-message", "-p", "-t", `${session}:${window}`, "#{window_bell_flag}"]).stdout.trim() === "1",
+    );
+
+    await f.launchOverview();
+    await f.waitUntil("alert badge rendered", () => f.runnerContains("● 2m"));
+    const screen = f.captureRunner();
+    // Window badge carries the age; the session row aggregates its subtree.
+    expect(screen).toContain("● 2m");
+    expect(screen).toContain("● 1");
   });
 }, TEST_TIMEOUT_MS);
 

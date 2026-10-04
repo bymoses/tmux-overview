@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{ConfirmAction, InputAction, Modal, ProcStats, Row, SavedSession, Session, Window};
+use crate::model::{ConfirmAction, InputAction, Modal, PaneSnapshot, ProcStats, Row, SavedSession, Session, Window};
 use crate::saved::load_saved_sessions;
 use crate::tmux_api::tmux;
 use crate::util::session_display_name;
@@ -16,6 +16,16 @@ pub(crate) fn session_is_hidden(name: &str) -> bool {
                     || part.starts_with('󰚩')
                     || part.starts_with('🤖')
             })
+}
+
+/// Alerts owned by `name` plus every slash-named descendant session.
+fn subtree_alerts(alerts_by_session: &HashMap<String, usize>, name: &str) -> usize {
+    let prefix = format!("{}/", name);
+    alerts_by_session
+        .iter()
+        .filter(|(session, _)| *session == name || session.starts_with(&prefix))
+        .map(|(_, count)| *count)
+        .sum()
 }
 
 fn nearest_parent_name(name: &str, live_names: &HashSet<String>) -> Option<String> {
@@ -48,7 +58,7 @@ fn append_session_tree(
     displayed.display_name = session_display_name(raw_display_name);
     rows.push(Row::Session(displayed));
 
-    if !*expanded.get(&session.name).unwrap_or(&true) {
+    if !crate::util::session_is_expanded(expanded, &session.name) {
         return;
     }
     if let Some(windows) = windows_by_session.get(&session.id) {
@@ -78,7 +88,7 @@ pub(crate) fn load_rows(
     watchlist: &HashSet<String>,
     session_stats: &HashMap<String, ProcStats>,
     window_stats: &HashMap<String, ProcStats>,
-    window_labels: &HashMap<String, Vec<String>>,
+    window_labels: &PaneSnapshot,
     saved_sessions: &[SavedSession],
     show_hidden: bool,
 ) -> Vec<Row> {
@@ -102,13 +112,27 @@ pub(crate) fn load_rows(
     ])
     .unwrap_or_default();
 
+    // Alerts are counted across every session, including hidden ones, so a
+    // collapsed or `__`-hidden agent session still surfaces on its ancestor.
+    let mut alerts_by_session: HashMap<String, usize> = HashMap::new();
+    for line in windows_raw.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        if let Some(alert) = window_labels.alerts.get(parts[2]) {
+            *alerts_by_session.entry(parts[1].to_string()).or_default() += alert.panes;
+        }
+    }
+
     let mut windows_by_session: HashMap<String, Vec<Window>> = HashMap::new();
     for line in windows_raw.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 6 || (!show_hidden && session_is_hidden(parts[1])) {
             continue;
         }
-        let pane_labels = window_labels.get(parts[2]).cloned().unwrap_or_default();
+        let pane_labels = window_labels.labels.get(parts[2]).cloned().unwrap_or_default();
+        let alert = window_labels.alerts.get(parts[2]).cloned();
         let w = Window {
             session_id: parts[0].to_string(),
             session_name: parts[1].to_string(),
@@ -119,6 +143,7 @@ pub(crate) fn load_rows(
             active: parts[5] == "1",
             pane_labels,
             stats: window_stats.get(parts[2]).cloned().unwrap_or_default(),
+            alert,
         };
         windows_by_session.entry(w.session_id.clone()).or_default().push(w);
     }
@@ -164,9 +189,15 @@ pub(crate) fn load_rows(
             saved_label,
             default_path,
             stats: session_stats.get(parts[0]).cloned().unwrap_or_default(),
+            alerts: subtree_alerts(&alerts_by_session, parts[1]),
         });
     }
-    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    let bg_last = |a: &Session, b: &Session| {
+        crate::util::is_bg_session(&a.name)
+            .cmp(&crate::util::is_bg_session(&b.name))
+            .then_with(|| a.name.cmp(&b.name))
+    };
+    sessions.sort_by(bg_last);
 
     let visible_names: HashSet<String> = sessions.iter().map(|session| session.name.clone()).collect();
     let mut roots = Vec::new();
@@ -179,7 +210,7 @@ pub(crate) fn load_rows(
         }
     }
     for child_sessions in children.values_mut() {
-        child_sessions.sort_by(|a, b| a.name.cmp(&b.name));
+        child_sessions.sort_by(bg_last);
     }
     for session in &roots {
         append_session_tree(
@@ -259,7 +290,7 @@ pub(crate) fn reload_rows_into(
     watchlist: &HashSet<String>,
     session_stats: &HashMap<String, ProcStats>,
     window_stats: &HashMap<String, ProcStats>,
-    window_labels: &HashMap<String, Vec<String>>,
+    window_labels: &PaneSnapshot,
     saved_sessions: &[SavedSession],
     show_hidden: bool,
 ) {
@@ -273,7 +304,7 @@ pub(crate) fn reload_rows_clamped(
     watchlist: &HashSet<String>,
     session_stats: &HashMap<String, ProcStats>,
     window_stats: &HashMap<String, ProcStats>,
-    window_labels: &HashMap<String, Vec<String>>,
+    window_labels: &PaneSnapshot,
     saved_sessions: &[SavedSession],
     show_hidden: bool,
 ) {
@@ -295,7 +326,7 @@ pub(crate) fn reload_saved_rows_clamped(
     watchlist: &HashSet<String>,
     session_stats: &HashMap<String, ProcStats>,
     window_stats: &HashMap<String, ProcStats>,
-    window_labels: &HashMap<String, Vec<String>>,
+    window_labels: &PaneSnapshot,
     show_hidden: bool,
 ) {
     *saved_sessions = load_saved_sessions();

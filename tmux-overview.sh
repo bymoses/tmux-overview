@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+build_only=false
+case "${1:-}" in
+  --build-only)
+    build_only=true
+    shift
+    ;;
+  "") ;;
+  *)
+    printf 'usage: %s [--build-only]\n' "$0" >&2
+    exit 2
+    ;;
+esac
+if (( $# > 0 )); then
+  printf 'usage: %s [--build-only]\n' "$0" >&2
+  exit 2
+fi
+
 src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src="$src_dir/src/main.rs"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-overview"
@@ -48,12 +65,18 @@ if needs_build; then
       mv -f "$tmp" "$bin"
       trap - EXIT
     else
-      printf 'cannot build tmux-overview: neither local rustc nor docker is available\n'
-      printf 'press any key to close...'
-      IFS= read -rsn1 _ || true
+      printf 'cannot build tmux-overview: compilers unavailable or compilation failed\n' >&2
+      if [[ "$build_only" != true ]]; then
+        printf 'press any key to close...'
+        IFS= read -rsn1 _ || true
+      fi
       exit 1
     fi
   fi
+fi
+
+if [[ "$build_only" == true ]]; then
+  exit 0
 fi
 
 exec "$bin"

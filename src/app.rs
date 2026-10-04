@@ -10,8 +10,8 @@ use crate::model::{Modal, ModalKeyResult, ProcStats, Row, Session};
 use crate::render::{help_modal, render};
 use crate::rows::{add_modal_for, clamp_selected, default_path_modal_for, delete_modal_for, first_selectable, is_selectable, kill_session_modal_for, last_selectable, load_rows, reload_rows_into, reload_saved_rows_clamped, rename_modal_for, row_key, row_target, selectable_after, selectable_before, selected_index_for_current_window, selected_index_for_key};
 use crate::saved::{load_saved_sessions, restore_saved_session, save_session_snapshot};
-use crate::state::{load_cursor_key, load_expanded_state, load_show_hidden_state, load_show_stats_state, load_watchlist_state, save_cursor_key, save_expanded_state, save_show_hidden_state, save_show_stats_state, save_watchlist_state};
-use crate::stats::{collect_proc_stats, collect_window_labels};
+use crate::state::{load_cursor_key, load_expanded_state, load_preview_percent_state, load_show_hidden_state, load_show_preview_state, load_show_stats_state, load_show_tree_state, load_watchlist_state, save_cursor_key, save_expanded_state, save_preview_percent_state, save_show_hidden_state, save_show_preview_state, save_show_stats_state, save_show_tree_state, save_watchlist_state};
+use crate::stats::{collect_pane_snapshot, collect_proc_stats};
 use crate::terminal::{read_key_timeout, TerminalGuard};
 use crate::tmux_api::tmux_status_ignore;
 
@@ -40,7 +40,7 @@ pub(crate) fn run() -> io::Result<()> {
     let mut preview_percent = env::var("TMUX_OVERVIEW_PREVIEW_PERCENT")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(65)
+        .unwrap_or_else(load_preview_percent_state)
         .clamp(20, 85);
     let stats_interval_secs = env::var("TMUX_OVERVIEW_STATS_INTERVAL")
         .ok()
@@ -52,15 +52,16 @@ pub(crate) fn run() -> io::Result<()> {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(100)
         .clamp(50, 5000);
-    let mut show_preview = true;
+    let mut show_preview = load_show_preview_state();
     let mut show_stats = load_show_stats_state();
     let mut show_hidden = load_show_hidden_state();
+    let mut show_tree = load_show_tree_state();
     let mut message = String::from("stats are collected in the background");
     let mut modal = Modal::None;
 
     let mut session_stats: HashMap<String, ProcStats> = HashMap::new();
     let mut window_stats: HashMap<String, ProcStats> = HashMap::new();
-    let mut window_labels = collect_window_labels();
+    let mut window_labels = collect_pane_snapshot();
     let mut saved_sessions = load_saved_sessions();
     let mut rows = load_rows(
         &expanded,
@@ -93,7 +94,7 @@ pub(crate) fn run() -> io::Result<()> {
     let (labels_tx, labels_rx) = mpsc::channel();
     thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(title_interval_ms));
-        if labels_tx.send(collect_window_labels()).is_err() {
+        if labels_tx.send(collect_pane_snapshot()).is_err() {
             break;
         }
     });
@@ -129,6 +130,7 @@ pub(crate) fn run() -> io::Result<()> {
                 preview_percent,
                 show_preview,
                 show_stats,
+                show_tree,
                 stats_interval_secs,
                 &message,
                 &modal,
@@ -189,7 +191,7 @@ pub(crate) fn run() -> io::Result<()> {
             }
             b" " => {
                 if let Some(Row::Session(s)) = rows.get(selected) {
-                    let now = *expanded.get(&s.name).unwrap_or(&true);
+                    let now = crate::util::session_is_expanded(&expanded, &s.name);
                     expanded.insert(s.name.clone(), !now);
                     save_expanded_state(&expanded);
                     reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
@@ -224,6 +226,12 @@ pub(crate) fn run() -> io::Result<()> {
             }
             b"v" => {
                 show_preview = !show_preview;
+                save_show_preview_state(show_preview);
+                message = if show_preview {
+                    String::from("preview on")
+                } else {
+                    String::from("preview off")
+                };
                 dirty = true;
             }
             b"s" => {
@@ -233,6 +241,16 @@ pub(crate) fn run() -> io::Result<()> {
                     String::from("stats view on")
                 } else {
                     String::from("compact view on")
+                };
+                dirty = true;
+            }
+            b"t" => {
+                show_tree = !show_tree;
+                save_show_tree_state(show_tree);
+                message = if show_tree {
+                    String::from("tree view on")
+                } else {
+                    String::from("tree view off")
                 };
                 dirty = true;
             }
@@ -259,10 +277,12 @@ pub(crate) fn run() -> io::Result<()> {
             }
             b"+" | b"=" => {
                 preview_percent = (preview_percent + 5).min(85);
+                save_preview_percent_state(preview_percent);
                 dirty = true;
             }
             b"-" | b"_" => {
                 preview_percent = preview_percent.saturating_sub(5).max(20);
+                save_preview_percent_state(preview_percent);
                 dirty = true;
             }
             b"?" => {
@@ -308,6 +328,7 @@ pub(crate) fn run() -> io::Result<()> {
                         saved_label: None,
                         default_path: String::new(),
                         stats: ProcStats::default(),
+                        alerts: 0,
                     }),
                     Row::WatchHeader | Row::SavedSession(_) => None,
                 });

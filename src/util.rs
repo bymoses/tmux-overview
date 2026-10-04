@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -6,10 +7,25 @@ pub(crate) fn session_display_name(name: &str) -> String {
         .map(|component| match component {
             "__float" => "◫ float",
             "__agents" => "󰚩 agents",
+            "__bg" => "\u{F018D} bg",
             _ => component,
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+/// Whether a session's windows are listed. An explicit toggle wins; otherwise
+/// `__bg` (the bash tool's job runner, often many windows) starts collapsed.
+pub(crate) fn session_is_expanded(expanded: &HashMap<String, bool>, name: &str) -> bool {
+    match expanded.get(name) {
+        Some(value) => *value,
+        None => !is_bg_session(name),
+    }
+}
+
+/// The bash tool's job-runner session: listed last among its siblings, dimmed.
+pub(crate) fn is_bg_session(name: &str) -> bool {
+    name == "__bg" || name.ends_with("/__bg")
 }
 
 pub(crate) fn hex_encode(s: &str) -> String {

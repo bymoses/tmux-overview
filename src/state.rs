@@ -22,12 +22,12 @@ pub(crate) fn cursor_path() -> Option<PathBuf> {
     Some(cache_dir()?.join("cursor"))
 }
 
-fn boolean_state_path(name: &str) -> Option<PathBuf> {
+fn scalar_state_path(name: &str) -> Option<PathBuf> {
     Some(cache_dir()?.join(name))
 }
 
 fn load_boolean_state(name: &str, default: bool) -> bool {
-    let Some(path) = boolean_state_path(name) else {
+    let Some(path) = scalar_state_path(name) else {
         return default;
     };
     match fs::read_to_string(path).ok().as_deref().map(str::trim) {
@@ -38,7 +38,7 @@ fn load_boolean_state(name: &str, default: bool) -> bool {
 }
 
 fn save_boolean_state(name: &str, value: bool) {
-    let Some(path) = boolean_state_path(name) else {
+    let Some(path) = scalar_state_path(name) else {
         return;
     };
     if let Some(parent) = path.parent() {
@@ -61,6 +61,43 @@ pub(crate) fn load_show_hidden_state() -> bool {
 
 pub(crate) fn save_show_hidden_state(value: bool) {
     save_boolean_state("show-hidden", value);
+}
+
+pub(crate) fn load_show_tree_state() -> bool {
+    load_boolean_state("show-tree", true)
+}
+
+pub(crate) fn save_show_tree_state(value: bool) {
+    save_boolean_state("show-tree", value);
+}
+
+pub(crate) fn load_show_preview_state() -> bool {
+    load_boolean_state("show-preview", true)
+}
+
+pub(crate) fn save_show_preview_state(value: bool) {
+    save_boolean_state("show-preview", value);
+}
+
+pub(crate) fn load_preview_percent_state() -> usize {
+    let Some(path) = scalar_state_path("preview-percent") else {
+        return 65;
+    };
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(65)
+        .clamp(20, 85)
+}
+
+pub(crate) fn save_preview_percent_state(value: usize) {
+    let Some(path) = scalar_state_path("preview-percent") else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, format!("{}\n", value.clamp(20, 85)));
 }
 
 pub(crate) fn load_expanded_state() -> HashMap<String, bool> {
@@ -103,6 +140,9 @@ pub(crate) fn save_expanded_state(expanded: &HashMap<String, bool>) {
     let _ = fs::write(path, contents);
 }
 
+/// Watched window ids for the running server. Lines are `<server start_time>\t<@id>`;
+/// tmux reuses `@N` ids after a restart, so entries from other servers (and bare
+/// ids from the old format) are dropped, as are ids whose window is gone.
 pub(crate) fn load_watchlist_state() -> std::collections::HashSet<String> {
     let Some(path) = watchlist_path() else {
         return std::collections::HashSet::new();
@@ -110,11 +150,20 @@ pub(crate) fn load_watchlist_state() -> std::collections::HashSet<String> {
     let Ok(contents) = fs::read_to_string(path) else {
         return std::collections::HashSet::new();
     };
+    let server = crate::tmux_api::server_start_time();
+    if server.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    let live: std::collections::HashSet<String> = crate::tmux_api::tmux(&["list-windows", "-a", "-F", "#{window_id}"])
+        .unwrap_or_default()
+        .lines()
+        .map(ToString::to_string)
+        .collect();
     contents
         .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToString::to_string)
+        .filter_map(|line| line.trim().split_once('\t'))
+        .filter(|(start_time, id)| *start_time == server && live.contains(*id))
+        .map(|(_, id)| id.to_string())
         .collect()
 }
 
@@ -125,12 +174,12 @@ pub(crate) fn save_watchlist_state(watchlist: &std::collections::HashSet<String>
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let server = crate::tmux_api::server_start_time();
     let mut entries: Vec<_> = watchlist.iter().collect();
     entries.sort();
     let mut contents = String::new();
     for id in entries {
-        contents.push_str(id);
-        contents.push('\n');
+        contents.push_str(&format!("{}\t{}\n", server, id));
     }
     let _ = fs::write(path, contents);
 }

@@ -19,22 +19,18 @@ Guidance for coding agents working in this repository.
   - `tests/e2e.test.ts`
   - `README.md`
 
-## Validation
+## Build and validation
 
-Prefer these checks before committing:
+Use the Makefile as the canonical entry point so builds always go through the user-facing wrapper:
 
 ```sh
-docker run --rm \
-  -v "$PWD:/src:ro" \
-  -v /tmp/tmux-overview-build:/out \
-  -w /src \
-  rust:1-alpine \
-  rustc -C debuginfo=0 /src/src/main.rs -o /out/tmux-overview
-
-bun test tests/e2e.test.ts
+make build
+make check
 ```
 
-The e2e suite requires `bun`, `tmux`, and either `rustc` or `docker`. Local `rustc` is not guaranteed to be installed on the host; use the Docker command above to build this Rust tool when it is unavailable.
+`make build` calls `./tmux-overview.sh --build-only`, which uses local `rustc` or falls back to Docker. `make check` validates the wrapper, builds through it, and runs the isolated E2E suite. Do not invoke `rustc` or the Docker build directly unless debugging the wrapper itself.
+
+The E2E suite requires `bun`, `tmux`, and either `rustc` or `docker`.
 
 ## Style
 

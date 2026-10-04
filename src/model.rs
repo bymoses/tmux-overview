@@ -1,3 +1,23 @@
+use std::collections::HashMap;
+
+/// An agent pane that stopped and has not been reviewed yet.
+///
+/// "Not reviewed" is tmux's own bookkeeping: the producer rings the bell when
+/// it stops, and `window_bell_flag` stays set until the window is focused.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct AgentAlert {
+    pub(crate) state: String,
+    pub(crate) idle_at: u64,
+    pub(crate) panes: usize,
+}
+
+/// One `list-panes -a` sweep: per-window pane labels plus agent alerts.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct PaneSnapshot {
+    pub(crate) labels: HashMap<String, Vec<String>>,
+    pub(crate) alerts: HashMap<String, AgentAlert>,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ProcStats {
     pub(crate) cpu: f64,
@@ -14,6 +34,8 @@ pub(crate) struct Session {
     pub(crate) saved_label: Option<String>,
     pub(crate) default_path: String,
     pub(crate) stats: ProcStats,
+    /// Unreviewed agent alerts in this session's whole subtree.
+    pub(crate) alerts: usize,
 }
 
 #[derive(Clone)]
@@ -27,6 +49,7 @@ pub(crate) struct Window {
     pub(crate) active: bool,
     pub(crate) pane_labels: Vec<String>,
     pub(crate) stats: ProcStats,
+    pub(crate) alert: Option<AgentAlert>,
 }
 
 #[derive(Clone)]

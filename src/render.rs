@@ -1,16 +1,51 @@
 use std::collections::HashMap;
 use std::io::{self, Write};
 
-use crate::model::{Modal, ProcStats, Row};
+use crate::model::{AgentAlert, Modal, ProcStats, Row};
 use crate::preview::preview_for_row;
 use crate::terminal::term_size;
-use crate::util::{plain_truncate, session_display_name, strip_ansi, text_width, visible_truncate_ansi};
+use crate::util::{is_bg_session, plain_truncate, session_display_name, session_is_expanded, strip_ansi, text_width, visible_truncate_ansi};
+
+const SESSION_COLOR: &str = "\x1b[1;38;5;252m";
+/// `__bg` session rows and their windows: dim, not bold.
+const BG_COLOR: &str = "\x1b[22;38;5;240m";
 
 pub(crate) fn session_expanded(row: &Row, expanded: &HashMap<String, bool>) -> bool {
     match row {
-        Row::Session(s) => *expanded.get(&s.name).unwrap_or(&true),
+        Row::Session(s) => session_is_expanded(expanded, &s.name),
         _ => false,
     }
+}
+
+const ALERT_COLOR: &str = "\x1b[1;38;2;255;100;150m";
+
+fn format_age(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{}s", seconds)
+    }
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// Bright badge for an agent that stopped and has not been reviewed yet.
+fn alert_badge(alert: &AgentAlert) -> String {
+    let glyph = if alert.state == "exited" { "◌" } else { "●" };
+    let count = if alert.panes > 1 { alert.panes.to_string() } else { String::new() };
+    let age = if alert.idle_at > 0 {
+        format!(" {}", format_age(now_epoch().saturating_sub(alert.idle_at)))
+    } else {
+        String::new()
+    };
+    format!("{} {}{}{}\x1b[0m", ALERT_COLOR, glyph, count, age)
 }
 
 pub(crate) fn format_cpu(stats: &ProcStats) -> String {
@@ -26,10 +61,118 @@ pub(crate) fn format_mem(stats: &ProcStats) -> String {
         format!("{}K", stats.rss_kb)
     }
 }
+fn session_index_before_at_depth(rows: &[Row], index: usize, depth: usize) -> Option<usize> {
+    rows[..index]
+        .iter()
+        .rposition(|row| matches!(row, Row::Session(session) if session.depth == depth))
+}
+
+fn session_has_later_sibling(rows: &[Row], index: usize) -> bool {
+    let Row::Session(session) = &rows[index] else {
+        return false;
+    };
+    for row in &rows[index + 1..] {
+        if let Row::Session(candidate) = row {
+            if candidate.depth == session.depth {
+                return true;
+            }
+            if candidate.depth < session.depth {
+                return false;
+            }
+        }
+    }
+    false
+}
+
+fn session_has_visible_child(rows: &[Row], session_index: usize) -> bool {
+    let Row::Session(session) = &rows[session_index] else {
+        return false;
+    };
+    for row in &rows[session_index + 1..] {
+        if let Row::Session(candidate) = row {
+            if candidate.depth <= session.depth {
+                return false;
+            }
+            if candidate.depth == session.depth + 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn window_has_following_item(rows: &[Row], index: usize, session_index: usize) -> bool {
+    let Row::Window(window) = &rows[index] else {
+        return false;
+    };
+    let owner_depth = match &rows[session_index] {
+        Row::Session(session) => session.depth,
+        _ => return false,
+    };
+    for row in &rows[index + 1..] {
+        match row {
+            Row::Window(candidate) if candidate.session_id == window.session_id => return true,
+            Row::Session(candidate) if candidate.depth == owner_depth + 1 => return true,
+            Row::Session(candidate) if candidate.depth <= owner_depth => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn tree_prefix(rows: &[Row], index: usize) -> String {
+    const SESSION_EDGE: &str = "\x1b[38;5;252m";
+    const WINDOW_EDGE: &str = "\x1b[38;5;244m";
+
+    let mut prefix = String::new();
+    let (depth, is_window) = match &rows[index] {
+        Row::Session(session) => (session.depth, false),
+        Row::Window(window) => (window.depth, true),
+        _ => return prefix,
+    };
+
+    let guide_end = if is_window { depth + 1 } else { depth };
+    for ancestor_depth in 1..guide_end {
+        if let Some(ancestor_index) = session_index_before_at_depth(rows, index, ancestor_depth) {
+            prefix.push_str(SESSION_EDGE);
+            prefix.push_str(if session_has_later_sibling(rows, ancestor_index) { "│  " } else { "   " });
+        }
+    }
+
+    if !is_window {
+        if depth > 0 {
+            prefix.push_str(SESSION_EDGE);
+            prefix.push_str(if session_has_later_sibling(rows, index) { "├─ " } else { "└─ " });
+        }
+        return prefix;
+    }
+
+    let Some(session_index) = rows[..index]
+        .iter()
+        .rposition(|row| matches!(row, Row::Session(session) if session.depth == depth))
+    else {
+        return prefix;
+    };
+    let following = window_has_following_item(rows, index, session_index);
+    prefix.push_str(if following && session_has_visible_child(rows, session_index) {
+        SESSION_EDGE
+    } else {
+        WINDOW_EDGE
+    });
+    prefix.push_str(if following { "├" } else { "└" });
+    prefix.push_str(WINDOW_EDGE);
+    prefix.push_str(match &rows[index] {
+        Row::Window(window) if window.active => "─◆ ",
+        _ => "─  ",
+    });
+    prefix
+}
+
 pub(crate) fn row_parts(
     row: &Row,
     expanded: &HashMap<String, bool>,
     show_stats: bool,
+    show_tree: bool,
 ) -> (String, String, String, Vec<String>, bool) {
     match row {
         Row::WatchHeader => (
@@ -41,21 +184,27 @@ pub(crate) fn row_parts(
         ),
         Row::Session(s) => {
             let arrow = if session_expanded(row, expanded) { "▾" } else { "▸" };
+            let base = if is_bg_session(&s.name) { BG_COLOR } else { SESSION_COLOR };
             let mut name = if s.current {
-                format!("\x1b[38;2;255;100;150m{}\x1b[1;38;5;252m", s.display_name)
+                format!("\x1b[38;2;255;100;150m{}{}", s.display_name, base)
             } else {
                 s.display_name.clone()
             };
             if let Some(saved_label) = &s.saved_label {
-                name.push_str(&format!("\x1b[38;5;240m 󰆓 {}\x1b[1;38;5;252m", saved_label));
+                name.push_str(&format!("\x1b[38;5;240m 󰆓 {}{}", saved_label, base));
+            }
+            if s.alerts > 0 {
+                name.push_str(&format!("{} ● {}{}", ALERT_COLOR, s.alerts, base));
             }
             let right = if s.default_path.is_empty() {
                 Vec::new()
             } else {
                 vec![format!("path {}", s.default_path)]
             };
+            let indent = if show_tree { String::new() } else { "  ".repeat(s.depth) };
             (
-                format!("{}{}  {}", "  ".repeat(s.depth), arrow, name),
+                // Restate the row colour: tree_prefix leaves its edge colour set.
+                format!("{}{}{} {}", base, indent, arrow, name),
                 format_cpu(&s.stats),
                 format_mem(&s.stats),
                 right,
@@ -64,11 +213,14 @@ pub(crate) fn row_parts(
         }
         Row::WatchWindow(w) => {
             let dot = if w.active { "•" } else { " " };
-            let item = if show_stats {
-                format!("   {}  {}:{}  {}", dot, session_display_name(&w.session_name), w.index, w.name)
+            let mut item = if show_stats {
+                format!("   {} {}:{}  {}", dot, session_display_name(&w.session_name), w.index, w.name)
             } else {
-                format!("   {}  {}  {}", dot, session_display_name(&w.session_name), w.name)
+                format!("   {} {}  {}", dot, session_display_name(&w.session_name), w.name)
             };
+            if let Some(alert) = &w.alert {
+                item.push_str(&alert_badge(alert));
+            }
             (
                 item,
                 format_cpu(&w.stats),
@@ -79,11 +231,19 @@ pub(crate) fn row_parts(
         }
         Row::Window(w) => {
             let dot = if w.active { "•" } else { " " };
-            let item = if show_stats {
-                format!("{}   {}  {}: {}", "  ".repeat(w.depth), dot, w.index, w.name)
+            let mut item = if is_bg_session(&w.session_name) { BG_COLOR.to_string() } else { String::new() };
+            item.push_str(&if show_tree && show_stats {
+                format!("{}: {}", w.index, w.name)
+            } else if show_tree {
+                w.name.clone()
+            } else if show_stats {
+                format!("{}   {} {}: {}", "  ".repeat(w.depth), dot, w.index, w.name)
             } else {
-                format!("{}   {}  {}", "  ".repeat(w.depth), dot, w.name)
-            };
+                format!("{}   {} {}", "  ".repeat(w.depth), dot, w.name)
+            });
+            if let Some(alert) = &w.alert {
+                item.push_str(&alert_badge(alert));
+            }
             (
                 item,
                 format_cpu(&w.stats),
@@ -93,7 +253,7 @@ pub(crate) fn row_parts(
             )
         }
         Row::SavedSession(s) => (
-            format!("󰆓  {}", session_display_name(&s.name)),
+            format!("󰆓 {}", session_display_name(&s.name)),
             String::new(),
             String::new(),
             vec![format!("{} · {} windows", s.saved_label, s.windows.len())],
@@ -106,10 +266,15 @@ pub(crate) fn compute_item_width(
     expanded: &HashMap<String, bool>,
     screen_width: usize,
     show_stats: bool,
+    show_tree: bool,
 ) -> usize {
     let max_item = rows
         .iter()
-        .map(|row| text_width(&row_parts(row, expanded, show_stats).0))
+        .enumerate()
+        .map(|(index, row)| {
+            let item = row_parts(row, expanded, show_stats, show_tree).0;
+            text_width(&format!("{}{}", if show_tree { tree_prefix(rows, index) } else { String::new() }, item))
+        })
         .max()
         .unwrap_or(24);
 
@@ -163,6 +328,7 @@ pub(crate) fn help_modal() -> Modal {
             "space toggle session fold".to_string(),
             "v preview, +/- resize".to_string(),
             "s compact/stats view".to_string(),
+            "t tree view".to_string(),
             ". show/hide helpers".to_string(),
             "a add window/session".to_string(),
             "w watch/unwatch window".to_string(),
@@ -244,21 +410,24 @@ pub(crate) fn draw_modal(out: &mut String, modal: &Modal, term_h: usize, term_w:
 }
 
 pub(crate) fn row_text(
-    row: &Row,
+    rows: &[Row],
+    index: usize,
     expanded: &HashMap<String, bool>,
     item_width: usize,
     show_stats: bool,
+    show_tree: bool,
 ) -> String {
     let cpu_width = 7usize;
     let mem_width = 6usize;
-    let (item, cpu, mem, pane_labels, is_window) = row_parts(row, expanded, show_stats);
+    let (item, cpu, mem, pane_labels, is_window) = row_parts(&rows[index], expanded, show_stats, show_tree);
+    let item = format!("{}{}", if show_tree { tree_prefix(rows, index) } else { String::new() }, item);
     let item_visible_width = text_width(&item).min(item_width);
     let item = visible_truncate_ansi(&item, item_width);
     let pad = " ".repeat(item_width.saturating_sub(item_visible_width));
 
     let cpu_cell = format!("{:>cpu_width$}", cpu, cpu_width = cpu_width);
     let mem_cell = format!("{:>mem_width$}", mem, mem_width = mem_width);
-    let stats_value = row_stats(row);
+    let stats_value = row_stats(&rows[index]);
     let cpu_high = is_window && stats_value.cpu > 100.0;
     let mem_high = is_window && stats_value.rss_kb > 500 * 1024;
     let cpu_colour = if cpu_high { "\x1b[38;2;255;100;150m" } else { "\x1b[38;5;240m" };
@@ -301,6 +470,7 @@ pub(crate) fn render(
     preview_percent: usize,
     show_preview: bool,
     show_stats: bool,
+    show_tree: bool,
     stats_interval_secs: u64,
     message: &str,
     modal: &Modal,
@@ -321,7 +491,7 @@ pub(crate) fn render(
     let side_w = if w >= 80 { w / 5 } else { 0 };
     let delim_w = if side_w > 0 { 1 } else { 0 };
     let left_w = w.saturating_sub(side_w + delim_w).max(20);
-    let item_width = compute_item_width(rows, expanded, left_w.saturating_sub(2), show_stats);
+    let item_width = compute_item_width(rows, expanded, left_w.saturating_sub(2), show_stats, show_tree);
     let total = cumulative_session_stats(rows);
     let help_lines = vec![
         "tmux overview".to_string(),
@@ -343,6 +513,7 @@ pub(crate) fn render(
         "+/- resize".to_string(),
         "v preview".to_string(),
         "s stats".to_string(),
+        "t tree".to_string(),
         ". hidden".to_string(),
         "a add".to_string(),
         "w watch".to_string(),
@@ -374,7 +545,7 @@ pub(crate) fn render(
             out.push_str(" no sessions");
             out.push_str(&" ".repeat(left_w.saturating_sub(12)));
         } else if idx < rows.len() {
-            let text = row_text(&rows[idx], expanded, item_width, show_stats);
+            let text = row_text(rows, idx, expanded, item_width, show_stats, show_tree);
             let content_w = left_w.saturating_sub(1);
             if idx == selected {
                 let plain = plain_truncate(&strip_ansi(&text), content_w);
@@ -386,7 +557,9 @@ pub(crate) fn render(
             } else {
                 match rows[idx] {
                     Row::WatchHeader => out.push_str("\x1b[1;38;5;240m "),
-                    Row::Session(_) => out.push_str("\x1b[1;38;5;252m "),
+                    Row::Session(ref s) if is_bg_session(&s.name) => out.push_str(&format!("{} ", BG_COLOR)),
+                    Row::Session(_) => out.push_str(&format!("{} ", SESSION_COLOR)),
+                    Row::Window(ref w) if is_bg_session(&w.session_name) => out.push_str(&format!("{} ", BG_COLOR)),
                     Row::WatchWindow(_) | Row::Window(_) => out.push_str("\x1b[38;5;244m "),
                     Row::SavedSession(_) => out.push_str("\x1b[38;5;240m "),
                 }

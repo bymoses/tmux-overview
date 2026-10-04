@@ -1,36 +1,69 @@
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
 
-use crate::model::ProcStats;
+use crate::model::{AgentAlert, PaneSnapshot, ProcStats};
 use crate::tmux_api::tmux;
 
-pub(crate) fn collect_window_labels() -> HashMap<String, Vec<String>> {
+/// Commands that count as agents even without `@agent_state`, so producers that
+/// only ring the bell (Claude Code, codex) still light up the same badges.
+const AGENT_COMMANDS: [&str; 4] = ["pi", "claude", "codex", "aider"];
+
+fn agent_state_for(state: &str, command: &str) -> Option<String> {
+    match state {
+        "idle" | "exited" | "blocked" => Some(state.to_string()),
+        "working" => None,
+        "" if AGENT_COMMANDS.contains(&command) => Some("stopped".to_string()),
+        _ => None,
+    }
+}
+
+pub(crate) fn collect_pane_snapshot() -> PaneSnapshot {
+    // Agent fields go before pane_title so a tab inside a title cannot shift them.
     let panes_raw = tmux(&[
         "list-panes",
         "-a",
         "-F",
-        "#{window_id}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}\t#{host_short}",
+        "#{window_id}\t#{pane_index}\t#{pane_current_command}\t#{window_bell_flag}\t#{@agent_state}\t#{@agent_idle_at}\t#{pane_title}\t#{host_short}",
     ])
     .unwrap_or_default();
 
     let mut panes_by_window: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    let mut alerts: HashMap<String, AgentAlert> = HashMap::new();
     for line in panes_raw.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 5 {
+        if parts.len() < 8 {
             continue;
         }
-        let title = parts[3].trim();
-        let host = parts[4].trim();
+        let window_id = parts[0];
+        let command = parts[2];
+        let title = parts[6].trim();
+        let host = parts[7].trim();
         let label = if !title.is_empty() && title != host {
             title.to_string()
         } else {
-            parts[2].to_string()
+            command.to_string()
         };
         let pane_index = parts[1].parse::<usize>().unwrap_or(0);
         panes_by_window
-            .entry(parts[0].to_string())
+            .entry(window_id.to_string())
             .or_default()
             .push((pane_index, label));
+
+        // The bell flag is the "stopped but not reviewed yet" part; tmux clears
+        // it the moment the window is focused.
+        if parts[3] != "1" {
+            continue;
+        }
+        let Some(state) = agent_state_for(parts[4], command) else {
+            continue;
+        };
+        let idle_at = parts[5].parse::<u64>().unwrap_or(0);
+        let entry = alerts.entry(window_id.to_string()).or_default();
+        entry.panes += 1;
+        if entry.state.is_empty() || idle_at >= entry.idle_at {
+            entry.state = state;
+        }
+        entry.idle_at = entry.idle_at.max(idle_at);
     }
 
     let mut labels = HashMap::new();
@@ -38,7 +71,7 @@ pub(crate) fn collect_window_labels() -> HashMap<String, Vec<String>> {
         panes.sort_by_key(|(pane_index, _)| *pane_index);
         labels.insert(window_id, panes.into_iter().map(|(_, label)| label).collect());
     }
-    labels
+    PaneSnapshot { labels, alerts }
 }
 pub(crate) fn collect_proc_stats() -> (HashMap<String, ProcStats>, HashMap<String, ProcStats>) {
     let panes_raw = tmux(&[
