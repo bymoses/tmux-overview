@@ -985,7 +985,8 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
       for (const [k, v] of Object.entries(opts)) expect(f.tmux(["set-option", "-p", "-t", target, k, v]).exitCode).toBe(0);
     };
     set(orch, { "@agent_kind": "pi", "@agent_state": "idle", "@pi_session": "/x/2026_conv-orch.jsonl" });
-    set(pane(`${first}/__agents:worker`), { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1" });
+    const w1 = pane(`${first}/__agents:worker`);
+    set(w1, { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1", "@agent_bg": "2" });
     // Resting on its own bg job: amber, counted apart from idle.
     set(pane(`${second}:solo`), { "@agent_kind": "pi", "@agent_state": "waiting" });
     // A finished worker (idle, bell not yet seen) must not flag its project or parent.
@@ -1026,6 +1027,9 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     await select("orch");
     f.sendRunnerKey("l");
     await f.waitUntil("worker under orchestrator", () => f.runnerContains("\u2500 \u25cf w1"));
+    // Pane id after the name; the bg jobs it waits for after its state.
+    expect(f.captureRunner()).toContain(`w1 ${w1}`);
+    expect(f.captureRunner()).toMatch(/working \S* ?\u26992/);
 
     // A pin keeps the agent listed under its collapsed project, keyed by its conversation.
     f.sendRunnerKey("p");

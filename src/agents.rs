@@ -48,6 +48,8 @@ pub(crate) struct Agent {
     pub bell: bool,
     /// Open conversation log (pi-kit's @pi_session); empty before the first message.
     pub session_file: String,
+    /// pi-kit's @agent_bg: detached bash jobs and scheduled checks it is waiting for.
+    pub bg: usize,
 }
 
 /// Tree node of a session: its path without helper segments (`__float`, `__agents`, 
@@ -130,13 +132,13 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}",
     ])
     .unwrap_or_default();
     raw.lines()
         .filter_map(|line| {
             let p: Vec<&str> = line.split('\t').collect();
-            if p.len() < 13 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
+            if p.len() < 14 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
                 return None;
             }
             Some(Agent {
@@ -150,6 +152,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
                 bell: p[9] == "1" && p[12] == "1",
                 name: p[10].to_string(),
                 session_file: p[11].to_string(),
+                bg: p[13].parse().unwrap_or(0),
             })
         })
         .collect()
@@ -387,8 +390,10 @@ fn age(at: u64) -> String {
     }
 }
 
+/// `waiting 3m \u{2699}2`: state, its age, and the bg jobs it waits for when there are any.
 fn state_text(a: &Agent) -> String {
-    format!("{} {}", a.state, age(a.state_at)).trim_end().to_string()
+    let bg = if a.bg > 0 { format!("\u{2699}{}", a.bg) } else { String::new() };
+    vec![a.state.clone(), age(a.state_at), bg].into_iter().filter(|s| !s.is_empty()).collect::<Vec<String>>().join(" ")
 }
 
 /// ` ●3 ●1`: working in green, finished in purple, zeros left out; `base` is restored
@@ -412,8 +417,10 @@ fn faint(s: &str, base: &str) -> String {
     format!("\x1b[0m{}{}\x1b[0m{}", FAINT, s, base)
 }
 
-fn label_with_pin(a: &Agent, pinned: bool) -> String {
-    if pinned { format!("{} {}", a.label(), PIN) } else { a.label() }
+/// Name, pin mark, and the pane id in the faint colour (ends in `base`).
+fn label_with_pin(a: &Agent, pinned: bool, base: &str) -> String {
+    let name = if pinned { format!("{} {}", a.label(), PIN) } else { a.label() };
+    format!("{} {}", name, faint(&a.pane, base))
 }
 
 /// One list row (may hold colour codes) plus its base colour. Columns: tree, ●/○, label, state + age, ⑂ children.
@@ -433,10 +440,10 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static st
             let base = NAME;
             let tint = |s: &str| format!("\x1b[0m{}{}\x1b[0m{}", a.colour(), s, base);
             // Tree lines and fold arrows recede.
-            let head = format!("{}{} {}", faint(prefix, base), tint(a.dot()), label_with_pin(a, *pinned));
+            let head = format!("{}{} {}", faint(prefix, base), tint(a.dot()), label_with_pin(a, *pinned, base));
             let pad = name_w.saturating_sub(text_width(&head));
             let state = state_text(a);
-            let state = format!("{}{}", tint(&state), " ".repeat(12usize.saturating_sub(text_width(&state))));
+            let state = format!("{}{}", tint(&state), " ".repeat(15usize.saturating_sub(text_width(&state))));
             // The child count is faint too; its coloured counts keep their colours.
             let kids = if *children > 0 { format!("   \x1b[0m{}⑂ {}\x1b[0m{}{}", FAINT, children, base, counts(*working, *waiting, 0, base)) } else { String::new() };
             (format!("{}{}  {}{}", head, " ".repeat(pad), state, kids), base)
@@ -498,7 +505,7 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
     let name_w = rows
         .iter()
         .filter_map(|r| match r {
-            ARow::Agent { idx, prefix, pinned, .. } => Some(text_width(prefix) + 2 + text_width(&label_with_pin(&agents[*idx], *pinned))),
+            ARow::Agent { idx, prefix, pinned, .. } => Some(text_width(prefix) + 2 + text_width(&label_with_pin(&agents[*idx], *pinned, ""))),
             _ => None,
         })
         .max()
