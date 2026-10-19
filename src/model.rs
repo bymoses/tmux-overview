@@ -91,6 +91,8 @@ pub(crate) enum ConfirmAction {
     KillSession { target: String, name: String },
     KillWindow { target: String, name: String },
     DeleteSaved { name: String },
+    /// Switch the client to a helper session (`__agents`, `__float`) after a yes.
+    Switch { target: String },
 }
 
 #[derive(Clone)]
@@ -118,4 +120,6 @@ pub(crate) enum ModalKeyResult {
     Ignored,
     Redraw,
     Applied(String),
+    /// The action left the overview (a confirmed switch).
+    Exit,
 }

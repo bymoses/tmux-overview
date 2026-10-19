@@ -549,7 +549,8 @@ fn preview_lines(row: Option<&ARow>, agents: &[Agent], w: usize, h: usize) -> Ve
     out
 }
 
-fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, list_percent: usize) -> io::Result<()> {
+/// `confirm`: a pending "go to <session>?" question, drawn in place of the key hints.
+fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, list_percent: usize, confirm: Option<&str>) -> io::Result<()> {
     let (h, w) = term_size();
     let body_h = h.max(4);
     let list_h = body_h.saturating_sub(1);
@@ -579,7 +580,13 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
         let content_w = list_w.saturating_sub(1);
         if y + 1 == body_h {
             let hint = " A overview · enter go · h/l fold · p pin · J/K order · v preview · +/- width · q quit";
-            out.push_str(&format!("{}{}\x1b[0m", RULE, fit(hint, list_w)));
+            match confirm {
+                Some(session) => {
+                    let ask = format!(" go to {}?  y/enter yes \u{b7} any other key no", crate::util::session_display_name(session));
+                    out.push_str(&format!("{}{}\x1b[0m", FINISHED, fit(&ask, list_w)));
+                }
+                None => out.push_str(&format!("{}{}\x1b[0m", RULE, fit(hint, list_w))),
+            }
         } else if let Some(row) = rows.get(offset + y) {
             let (text, colour) = row_text(row, agents, name_w);
             if offset + y == selected {
@@ -611,6 +618,12 @@ fn current_project() -> String {
     node_of(session.trim())
 }
 
+fn go_to_pane(pane: &str) {
+    tmux_status_ignore(&["switch-client", "-t", pane]);
+    tmux_status_ignore(&["select-window", "-t", pane]);
+    tmux_status_ignore(&["select-pane", "-t", pane]);
+}
+
 fn select_key(rows: &[ARow], agents: &[Agent], key: &str) -> Option<usize> {
     rows.iter().position(|r| r.key(agents) == key)
 }
@@ -637,6 +650,8 @@ pub(crate) fn run<A, B>(
     let mut selected = rows.iter().position(|r| matches!(r, ARow::Agent { .. })).unwrap_or(0);
     let mut last_refresh = Instant::now();
     let mut dirty = true;
+    // (pane, session) waiting for a yes before switching into a helper session.
+    let mut confirm: Option<(String, String)> = None;
 
     loop {
         while drain_a.try_recv().is_ok() {}
@@ -653,12 +668,20 @@ pub(crate) fn run<A, B>(
         }
         selected = selected.min(rows.len().saturating_sub(1));
         if dirty {
-            render(&rows, &agents, selected, *show_preview, list_percent)?;
+            render(&rows, &agents, selected, *show_preview, list_percent, confirm.as_ref().map(|(_, s): &(String, String)| s.as_str()))?;
             dirty = false;
         }
 
         let Some(key) = read_key_timeout()? else { continue };
         dirty = true;
+        // Answer to "go to <helper session>?": yes jumps, anything else just closes the question.
+        if let Some((pane, _)) = confirm.take() {
+            if matches!(key.as_slice(), b"y" | b"Y" | b"\r" | b"\n") {
+                go_to_pane(&pane);
+                return Ok(Exit::Quit);
+            }
+            continue;
+        }
         let toggle = |expanded: &mut HashMap<String, bool>, name: &str, open: Option<bool>| {
             let now = project_expanded(expanded, name, &current);
             expanded.insert(expanded_key(name), open.unwrap_or(!now));
@@ -744,10 +767,12 @@ pub(crate) fn run<A, B>(
             }
             b"\r" | b"\n" => match rows.get(selected).cloned() {
                 Some(ARow::Agent { idx, .. }) => {
-                    let pane = agents[idx].pane.clone();
-                    tmux_status_ignore(&["switch-client", "-t", &pane]);
-                    tmux_status_ignore(&["select-window", "-t", &pane]);
-                    tmux_status_ignore(&["select-pane", "-t", &pane]);
+                    let a = &agents[idx];
+                    if crate::util::is_confirm_session(&a.session) {
+                        confirm = Some((a.pane.clone(), a.session.clone()));
+                        continue;
+                    }
+                    go_to_pane(&a.pane);
                     return Ok(Exit::Quit);
                 }
                 Some(ARow::Project { name, .. }) => {

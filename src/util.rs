@@ -28,6 +28,12 @@ pub(crate) fn is_agents_session(name: &str) -> bool {
     name == "__agents" || name.ends_with("/__agents")
 }
 
+/// Agent workers (`__agents`) and floats (`__float`): switching there needs a yes, so a stray
+/// enter does not drop the client into a worker's pane.
+pub(crate) fn is_confirm_session(name: &str) -> bool {
+    name.split('/').any(|s| s == "__agents" || s == "__float")
+}
+
 /// The bash tool's job-runner session: listed last among its siblings, dimmed.
 pub(crate) fn is_bg_session(name: &str) -> bool {
     name == "__bg" || name.ends_with("/__bg")

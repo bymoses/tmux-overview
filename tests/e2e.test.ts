@@ -613,6 +613,36 @@ e2e("agents helper session starts collapsed and unfolds with l", async () => {
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("enter on an __agents or __float session asks before switching", async () => {
+  await withFixture("confirm_helper", async (f) => {
+    const parent = `alpha_confirm_${process.pid}`;
+    await f.createSessionWithOutput(parent, "main", "CONFIRM_PARENT");
+    await f.createSessionWithOutput(`${parent}/__float`, "floaty", "CONFIRM_FLOAT");
+    await f.launchOverview();
+    f.sendRunnerKey(".");
+    await f.waitUntil("float session listed", () => f.runnerContains("\u25eb float"));
+    const selected = () => f.captureRunnerAnsi().split("\n").find((l) => l.includes("48;2;255;100;150m")) ?? "";
+    for (const key of ["k", "j"]) {
+      for (let i = 0; i < 20 && !selected().includes("floaty"); i++) {
+        f.sendRunnerKey(key);
+        await sleep(80);
+      }
+    }
+    expect(selected()).toContain("floaty");
+
+    f.sendRunnerKey("Enter");
+    await f.waitUntil("confirmation shown", () => f.runnerContains("go to "));
+    f.sendRunnerKey("n");
+    await f.waitUntil("confirmation closed", () => f.runnerLacks("go to "));
+    expect(f.captureRunner()).toContain("tmux overview");
+
+    f.sendRunnerKey("Enter");
+    await f.waitUntil("confirmation again", () => f.runnerContains("go to "));
+    f.sendRunnerKey("y");
+    await f.waitUntil("overview left after yes", () => f.runnerLacks("tmux overview"));
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("bg helper session starts collapsed even when helpers are shown", async () => {
   await withFixture("bg_collapsed", async (f) => {
     const parent = `alpha_bg_${process.pid}`;

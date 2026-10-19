@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::model::{ConfirmAction, InputAction, Modal, ModalKeyResult};
 use crate::saved::{delete_saved_session, rename_saved_session};
-use crate::tmux_api::{tmux, tmux_status_ok};
+use crate::tmux_api::{tmux, tmux_status_ignore, tmux_status_ok};
 
 fn expand_home(value: &str) -> String {
     if value == "~" || value.starts_with("~/") {
@@ -119,6 +119,10 @@ pub(crate) fn perform_confirm_action(action: ConfirmAction) -> Result<String, St
         ConfirmAction::DeleteSaved { name } => {
             delete_saved_session(&name)?;
             Ok(format!("deleted saved {}", name))
+        }
+        ConfirmAction::Switch { target } => {
+            tmux_status_ignore(&["switch-client", "-t", &target]);
+            Ok(String::new())
         }
     }
 }
@@ -277,6 +281,10 @@ pub(crate) fn handle_modal_key(modal: &mut Modal, key: &[u8]) -> ModalKeyResult 
         Modal::Confirm { action, .. } => match key {
             b"y" | b"Y" | b"\r" | b"\n" => {
                 *modal = Modal::None;
+                if let ConfirmAction::Switch { target } = action {
+                    tmux_status_ignore(&["switch-client", "-t", &target]);
+                    return ModalKeyResult::Exit;
+                }
                 ModalKeyResult::Applied(match perform_confirm_action(action) {
                     Ok(msg) => msg,
                     Err(e) => e,

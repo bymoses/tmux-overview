@@ -8,7 +8,7 @@ use std::time::Duration;
 use crate::actions::handle_modal_key;
 use crate::model::{Modal, ModalKeyResult, ProcStats, Row, Session};
 use crate::render::{help_modal, render};
-use crate::rows::{add_modal_for, clamp_selected, default_path_modal_for, delete_modal_for, first_selectable, is_selectable, kill_session_modal_for, last_selectable, load_rows, reload_rows_into, reload_saved_rows_clamped, rename_modal_for, row_key, row_target, selectable_after, selectable_before, selected_index_for_current_window, selected_index_for_key};
+use crate::rows::{add_modal_for, clamp_selected, default_path_modal_for, delete_modal_for, first_selectable, is_selectable, kill_session_modal_for, last_selectable, load_rows, reload_rows_into, reload_saved_rows_clamped, rename_modal_for, row_key, row_target, selectable_after, session_from_row, selectable_before, selected_index_for_current_window, selected_index_for_key};
 use crate::saved::{load_saved_sessions, restore_saved_session, save_session_snapshot};
 use crate::state::{load_agents_mode_state, save_agents_mode_state};
 use crate::state::{load_cursor_key, load_expanded_state, load_preview_percent_state, load_show_hidden_state, load_show_preview_state, load_show_stats_state, load_show_tree_state, load_watchlist_state, save_cursor_key, save_expanded_state, save_preview_percent_state, save_show_hidden_state, save_show_preview_state, save_show_stats_state, save_show_tree_state, save_watchlist_state};
@@ -176,6 +176,7 @@ pub(crate) fn run() -> io::Result<()> {
                 }
                 ModalKeyResult::Redraw => dirty = true,
                 ModalKeyResult::Ignored => {}
+                ModalKeyResult::Exit => break,
             }
             continue;
         }
@@ -432,6 +433,14 @@ pub(crate) fn run() -> io::Result<()> {
                         },
                         _ => {
                             let target = row_target(&row).to_string();
+                            if let Some((_, name)) = session_from_row(&row).filter(|(_, n)| crate::util::is_confirm_session(n)) {
+                                modal = Modal::Confirm {
+                                    title: format!("go to {}?", crate::util::session_display_name(&name)),
+                                    action: crate::model::ConfirmAction::Switch { target },
+                                };
+                                dirty = true;
+                                continue;
+                            }
                             tmux_status_ignore(&["switch-client", "-t", &target]);
                             break;
                         }
