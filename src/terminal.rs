@@ -49,13 +49,18 @@ pub(crate) fn term_size() -> (usize, usize) {
         }
     }
 
-    if let Ok(s) = tmux(&["display-message", "-p", "#{popup_height} #{popup_width}"]) {
-        if let Some(size) = parse_size_pair(&s) {
-            return clamp_term_size(size);
+    // display-popup opens a modal pane since tmux-git 34cd5da4e (#{popup_*} are gone): our own
+    // pane's size is exact and follows resizes.
+    if let Ok(pane) = env::var("TMUX_PANE") {
+        if let Ok(s) = tmux(&["display-message", "-p", "-t", &pane, "#{pane_height} #{pane_width}"]) {
+            if let Some(size) = parse_size_pair(&s) {
+                return clamp_term_size(size);
+            }
         }
     }
 
-    if let Ok(out) = Command::new("stty").arg("size").output() {
+    // output() gives the child a null stdin; stty needs the terminal.
+    if let Ok(out) = Command::new("stty").arg("size").stdin(std::process::Stdio::inherit()).output() {
         if let Some(size) = parse_size_pair(&String::from_utf8_lossy(&out.stdout)) {
             return clamp_term_size(size);
         }
