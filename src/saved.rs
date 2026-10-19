@@ -154,12 +154,14 @@ pub(crate) fn save_session_snapshot(session: &Session) -> Result<(), String> {
             "-t",
             window_id,
             "-F",
-            "#{pane_index}\t#{pane_active}\t#{pane_current_path}\t#{pane_current_command}",
+            "#{pane_index}\t#{pane_active}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_floating_flag}",
         ])
         .unwrap_or_default();
         for pane_line in panes_raw.lines() {
             let pane_parts: Vec<&str> = pane_line.split('\t').collect();
-            if pane_parts.len() < 4 {
+            // Floating panes (display-popup is one on tmux-git, e.g. this overview) would come
+            // back as tiled panes.
+            if pane_parts.len() < 4 || pane_parts.get(4) == Some(&"1") {
                 continue;
             }
             out.push_str("pane\t");

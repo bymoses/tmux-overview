@@ -23,15 +23,20 @@ pub(crate) fn collect_pane_snapshot() -> PaneSnapshot {
         "list-panes",
         "-a",
         "-F",
-        "#{window_id}\t#{pane_index}\t#{pane_current_command}\t#{window_bell_flag}\t#{@agent_state}\t#{@agent_idle_at}\t#{pane_title}\t#{host_short}",
+        "#{window_id}\t#{pane_index}\t#{pane_current_command}\t#{window_bell_flag}\t#{@agent_state}\t#{@agent_idle_at}\t#{pane_modal_flag}\t#{pane_title}\t#{host_short}",
     ])
     .unwrap_or_default();
 
     let mut panes_by_window: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     let mut alerts: HashMap<String, AgentAlert> = HashMap::new();
     for line in panes_raw.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 8 {
+        let mut parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 9 {
+            continue;
+        }
+        // A modal pane is a display-popup on tmux-git (the overview itself, among others):
+        // not part of the window's own panes.
+        if parts.remove(6) == "1" {
             continue;
         }
         let window_id = parts[0];
@@ -78,7 +83,7 @@ pub(crate) fn collect_proc_stats() -> (HashMap<String, ProcStats>, HashMap<Strin
         "list-panes",
         "-a",
         "-F",
-        "#{session_id}\t#{window_id}\t#{pane_pid}",
+        "#{session_id}\t#{window_id}\t#{pane_pid}\t#{pane_modal_flag}",
     ])
     .unwrap_or_default();
 
@@ -86,7 +91,7 @@ pub(crate) fn collect_proc_stats() -> (HashMap<String, ProcStats>, HashMap<Strin
     let mut window_roots: HashMap<String, Vec<i32>> = HashMap::new();
     for line in panes_raw.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 3 {
+        if parts.len() < 3 || parts.get(3) == Some(&"1") {
             continue;
         }
         if let Ok(pid) = parts[2].parse::<i32>() {
