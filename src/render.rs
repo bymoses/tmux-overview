@@ -477,8 +477,8 @@ pub(crate) fn render(
     modal: &Modal,
 ) -> io::Result<()> {
     let (h, w) = term_size();
-    // Keep one spare terminal row to avoid scrolling on the final CRLF.
-    let body_h = h.saturating_sub(1).max(8);
+    // Every row is drawn; the last row's CRLF is dropped below so the screen never scrolls.
+    let body_h = h.max(8);
     let preview_h = if show_preview {
         let mut ph = body_h * preview_percent / 100;
         ph = ph.max(3).min(body_h.saturating_sub(4).max(3));
@@ -618,6 +618,9 @@ pub(crate) fn render(
         }
     }
 
+    if out.ends_with("\r\n") {
+        out.truncate(out.len() - 2);
+    }
     draw_modal(&mut out, modal, h, w);
     out.push_str("\x1b[?2026l");
     print!("{}", out);

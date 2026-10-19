@@ -351,7 +351,7 @@ fn preview_lines(row: Option<&ARow>, agents: &[Agent], w: usize, h: usize) -> Ve
 
 fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, list_percent: usize) -> io::Result<()> {
     let (h, w) = term_size();
-    let body_h = h.saturating_sub(1).max(4);
+    let body_h = h.max(4);
     let list_h = body_h.saturating_sub(1);
     let list_w = if show_preview { (w * list_percent / 100).clamp(30, w.saturating_sub(21).max(30)) } else { w };
     let preview_w = w.saturating_sub(list_w + 1);
@@ -396,7 +396,8 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
             out.push_str(&format!("{}│\x1b[0m", RULE));
             out.push_str(&visible_truncate_ansi(&preview[y], preview_w));
         }
-        out.push_str("\x1b[K\r\n");
+        // No CRLF after the last row: it would scroll the screen up one line.
+        out.push_str(if y + 1 == body_h { "\x1b[K" } else { "\x1b[K\r\n" });
     }
     out.push_str("\x1b[?2026l");
     print!("{}", out);
