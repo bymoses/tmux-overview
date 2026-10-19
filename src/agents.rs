@@ -130,7 +130,8 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
 #[derive(Clone)]
 pub(crate) enum ARow {
     Project { name: String, depth: usize, agents: usize, working: usize, finished: usize, expanded: bool },
-    Agent { idx: usize, prefix: String, children: usize },
+    /// `working`/`finished` count hidden descendants while folded (`expanded` false).
+    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, finished: usize },
 }
 
 impl ARow {
@@ -144,6 +145,15 @@ impl ARow {
 
 fn expanded_key(project: &str) -> String {
     format!("agents:{}", project)
+}
+
+/// An agent's workers start folded; the row still shows their counts.
+fn agent_key(pane: &str) -> String {
+    format!("agents@{}", pane)
+}
+
+fn agent_expanded(expanded: &HashMap<String, bool>, pane: &str) -> bool {
+    expanded.get(&agent_key(pane)).copied().unwrap_or(false)
 }
 
 /// Default: open along the current session's branch, closed elsewhere.
@@ -216,9 +226,10 @@ pub(crate) fn build_rows(agents: &[Agent], expanded: &HashMap<String, bool>, cur
         if !open {
             continue;
         }
-        let lead = "  ".repeat(depth + 1);
+        // One step past the project's arrow, plus room for an agent's own fold arrow.
+        let lead = "  ".repeat(depth + 2);
         for &root in roots.get(node.as_str()).map(Vec::as_slice).unwrap_or(&[]) {
-            push_tree(&mut rows, agents, &children, root, lead.clone(), String::new(), &mut seen);
+            push_tree(&mut rows, agents, &children, expanded, root, &lead, None, &mut seen);
         }
         for child in kids.get(&node).cloned().unwrap_or_default().into_iter().rev() {
             stack.push((child, depth + 1));
@@ -227,34 +238,69 @@ pub(crate) fn build_rows(agents: &[Agent], expanded: &HashMap<String, bool>, cur
     rows
 }
 
+/// Every agent below `idx` in the spawn tree.
+fn descendants(agents: &[Agent], children: &HashMap<&str, Vec<usize>>, idx: usize, seen: &mut HashSet<usize>, out: &mut Vec<usize>) {
+    for &kid in children.get(agents[idx].pane.as_str()).map(Vec::as_slice).unwrap_or(&[]) {
+        if seen.insert(kid) {
+            out.push(kid);
+            descendants(agents, children, kid, seen, out);
+        }
+    }
+}
+
+/// `last`: None for a root, else whether this is its parent's last child. An agent with
+/// workers shows ▸/▾ in place of its branch dash (or of the root's indent).
+#[allow(clippy::too_many_arguments)]
 fn push_tree(
     rows: &mut Vec<ARow>,
     agents: &[Agent],
     children: &HashMap<&str, Vec<usize>>,
+    expanded: &HashMap<String, bool>,
     idx: usize,
-    lead: String,
-    branch: String,
+    lead: &str,
+    last: Option<bool>,
     seen: &mut HashSet<usize>,
 ) {
     if !seen.insert(idx) {
         return;
     }
     let kids = children.get(agents[idx].pane.as_str()).cloned().unwrap_or_default();
-    rows.push(ARow::Agent { idx, prefix: format!("{}{}", lead, branch), children: kids.len() });
+    let open = agent_expanded(expanded, &agents[idx].pane);
+    let fold = match (kids.is_empty(), open) {
+        (true, _) => None,
+        (false, true) => Some("▾"),
+        (false, false) => Some("▸"),
+    };
+    let prefix = match (last, fold) {
+        (None, None) => lead.to_string(),
+        // The root indent ends in two spaces; the arrow takes them so dots stay aligned.
+        (None, Some(f)) => format!("{}{} ", &lead[..lead.len().saturating_sub(2)], f),
+        (Some(l), f) => format!("{}{}{} ", lead, if l { "└" } else { "├" }, f.unwrap_or("─")),
+    };
+    let (mut working, mut finished) = (0, 0);
+    if !open {
+        let mut hidden = Vec::new();
+        descendants(agents, children, idx, &mut seen.clone(), &mut hidden);
+        working = hidden.iter().filter(|&&i| agents[i].working()).count();
+        finished = hidden.iter().filter(|&&i| agents[i].finished()).count();
+    }
+    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, finished });
+    if !open {
+        return;
+    }
     // Children hang under the parent's name, not its dot: a connector in the dot's column
     // reads as a sibling.
     let below = format!(
         "{}{}",
         lead,
-        match branch.as_str() {
-            "├─ " => "│    ",
-            "└─ " => "     ",
-            _ => "  ",
+        match last {
+            Some(false) => "│    ",
+            Some(true) => "     ",
+            None => "  ",
         }
     );
     for (n, kid) in kids.iter().enumerate() {
-        let b = if n + 1 == kids.len() { "└─ " } else { "├─ " };
-        push_tree(rows, agents, children, *kid, below.clone(), b.to_string(), seen);
+        push_tree(rows, agents, children, expanded, *kid, &below, Some(n + 1 == kids.len()), seen);
     }
 }
 
@@ -297,13 +343,20 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static st
                 if *finished > 0 && !*expanded { FINISHED } else { PROJECT_COLOR },
             )
         }
-        ARow::Agent { idx, prefix, children } => {
+        ARow::Agent { idx, prefix, children, working, finished, .. } => {
             let a = &agents[*idx];
             let head = format!("{}{} {}", prefix, a.dot(), a.label());
             let pad = name_w.saturating_sub(text_width(&head));
-            let kids = if *children > 0 { format!("   ⑂ {}", children) } else { String::new() };
+            let mut kids = if *children > 0 { format!("   ⑂ {}", children) } else { String::new() };
+            if *working > 0 {
+                kids.push_str(&format!(" · {} working", working));
+            }
+            if *finished > 0 {
+                kids.push_str(&format!(" · {} finished", finished));
+            }
             let text = format!("{}{}  {:<12}{}", head, " ".repeat(pad), state_text(a), kids);
-            (text, a.colour())
+            // A folded agent hiding finished workers takes their colour.
+            (text, if *finished > 0 { FINISHED } else { a.colour() })
         }
     }
 }
@@ -485,6 +538,11 @@ pub(crate) fn run<A, B>(
                 };
                 match rows.get(selected).cloned() {
                     Some(ARow::Project { name, .. }) => toggle(expanded, &name, open),
+                    // Fold or unfold an agent's workers; h on a folded one goes to its parent.
+                    Some(ARow::Agent { idx, children, expanded: now, .. }) if children > 0 && (open != Some(false) || now) => {
+                        expanded.insert(agent_key(&agents[idx].pane), open.unwrap_or(!now));
+                        crate::state::save_expanded_state(expanded);
+                    }
                     // h on an agent: go to its parent row (the project row for a root).
                     Some(ARow::Agent { idx, .. }) if open == Some(false) => {
                         let parent = agents[idx].parent.clone();
