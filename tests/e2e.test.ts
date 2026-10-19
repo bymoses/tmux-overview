@@ -959,6 +959,70 @@ e2e("unreviewed agent panes badge their window and roll up to the session", asyn
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("agents mode: spawn tree, folding, compact counts, pins and project order", async () => {
+  await withFixture("agents_mode", async (f) => {
+    const first = `ag_${process.pid}`;
+    const second = `zz_${process.pid}`;
+    await f.createSessionWithOutput(first, "orch", "ORCH_OUTPUT");
+    await f.createSessionWithOutput(`${first}/__agents`, "worker", "WORKER_OUTPUT");
+    await f.createSessionWithOutput(second, "solo", "SOLO_OUTPUT");
+    const pane = (target: string) => f.tmux(["display-message", "-p", "-t", target, "#{pane_id}"]).stdout.trim();
+    const orch = pane(`${first}:orch`);
+    const set = (target: string, opts: Record<string, string>) => {
+      for (const [k, v] of Object.entries(opts)) expect(f.tmux(["set-option", "-p", "-t", target, k, v]).exitCode).toBe(0);
+    };
+    set(orch, { "@agent_kind": "pi", "@agent_state": "idle", "@pi_session": "/x/2026_conv-orch.jsonl" });
+    set(pane(`${first}/__agents:worker`), { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1" });
+    set(pane(`${second}:solo`), { "@agent_kind": "pi", "@agent_state": "idle" });
+
+    await f.launchOverview();
+    f.sendRunnerKey("A");
+    await f.waitUntil("agents mode", () => f.runnerContains("A overview"));
+    const selected = () => f.captureRunnerAnsi().split("\n").find((l) => l.includes("48;2;255;100;150m")) ?? "";
+    const select = async (text: string) => {
+      for (const key of ["k", "j"]) {
+        for (let i = 0; i < 15 && !selected().includes(text); i++) {
+          f.sendRunnerKey(key);
+          await sleep(80);
+        }
+      }
+      expect(selected()).toContain(text);
+    };
+
+    // Neither project holds the runner session, so both start collapsed; counts are compact.
+    await f.waitUntil("collapsed projects", () => f.runnerContains(`\u25b8 ${first}  2 \u25cf1`));
+    expect(f.captureRunner()).toContain(`\u25b8 ${second}  1`);
+
+    // Unfolding the project shows the orchestrator with its worker folded under it.
+    await select(first);
+    f.sendRunnerKey("l");
+    await f.waitUntil("folded orchestrator", () => f.runnerContains("\u2442 1 \u25cf1"));
+    // (The project preview on the right still lists w1; the tree row does not.)
+    expect(f.captureRunner()).not.toContain("\u2500 \u25cf w1");
+    await select("orch");
+    f.sendRunnerKey("l");
+    await f.waitUntil("worker under orchestrator", () => f.runnerContains("\u2514\u2500 \u25cf w1"));
+
+    // A pin keeps the agent listed under its collapsed project, keyed by its conversation.
+    f.sendRunnerKey("p");
+    await f.waitUntil("pin mark", () => f.runnerContains("orch \u26b2"));
+    await select(first);
+    f.sendRunnerKey("h");
+    await f.waitUntil("project collapsed", () => f.runnerContains(`\u25b8 ${first}`));
+    expect(f.captureRunner()).toContain("orch \u26b2");
+    expect(readFileSync(join(f.cache, "tmux-overview", "agent-pins"), "utf8").trim()).toBe("2026_conv-orch");
+
+    // K moves a project up among its siblings; the order is saved.
+    await select(second);
+    f.sendRunnerKey("K");
+    await f.waitUntil("order changed", () => {
+      const s = f.captureRunner();
+      return s.indexOf(`\u25b8 ${second}`) < s.indexOf(`\u25b8 ${first}`);
+    });
+    expect(readFileSync(join(f.cache, "tmux-overview", "agents-order"), "utf8")).toBe(`${second}\n${first}\n`);
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("unicode-width pane titles and multi-pane preview layout", async () => {
   await withFixture("unicode_multi", async (f) => {
     const session = `alpha_unicode_${process.pid}`;

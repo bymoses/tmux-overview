@@ -47,6 +47,45 @@ fn save_boolean_state(name: &str, value: bool) {
     let _ = fs::write(path, if value { "1\n" } else { "0\n" });
 }
 
+/// One entry per line; blank lines dropped.
+fn load_lines(name: &str) -> Vec<String> {
+    scalar_state_path(name)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(ToString::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn save_lines(name: &str, lines: &[String]) {
+    let Some(path) = scalar_state_path(name) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, lines.iter().map(|l| format!("{}\n", l)).collect::<String>());
+}
+
+/// Agents mode pins: conversation ids (pane ids for agents without a log), so a pin
+/// survives a reboot restore that gives the agent a new pane.
+pub(crate) fn load_agent_pins() -> std::collections::HashSet<String> {
+    load_lines("agent-pins").into_iter().collect()
+}
+
+pub(crate) fn save_agent_pins(pins: &std::collections::HashSet<String>) {
+    let mut lines: Vec<String> = pins.iter().cloned().collect();
+    lines.sort();
+    save_lines("agent-pins", &lines);
+}
+
+/// Agents mode project order: node names (`dgt`, `dgt/eclion`); earlier sorts first among siblings.
+pub(crate) fn load_agents_order() -> Vec<String> {
+    load_lines("agents-order")
+}
+
+pub(crate) fn save_agents_order(order: &[String]) {
+    save_lines("agents-order", order);
+}
+
 /// Last screen used: the agents tree (`A`) or the session overview.
 pub(crate) fn load_agents_mode_state() -> bool {
     load_boolean_state("agents-mode", false)

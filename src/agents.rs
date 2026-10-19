@@ -10,7 +10,7 @@ use std::time::Instant;
 use crate::preview::{ansi_fit, capture_preview};
 use crate::terminal::{read_key_timeout, term_size};
 use crate::tmux_api::{tmux, tmux_status_ignore};
-use crate::util::{plain_truncate, text_width, visible_truncate_ansi};
+use crate::util::{plain_truncate, strip_ansi, text_width, visible_truncate_ansi};
 
 const SELECTED: &str = "\x1b[48;2;255;100;150m\x1b[38;2;0;0;0m";
 const PROJECT_COLOR: &str = "\x1b[1;38;5;252m";
@@ -20,6 +20,7 @@ const FINISHED: &str = "\x1b[1;38;2;255;100;150m";
 const DIM: &str = "\x1b[38;5;244m";
 const RULE: &str = "\x1b[38;5;238m";
 const REFRESH_MS: u128 = 500;
+const PIN: &str = "\u{26b2}";
 
 pub(crate) enum Exit {
     Quit,
@@ -38,6 +39,8 @@ pub(crate) struct Agent {
     pub name: String,
     /// Window bell flag: pi rang it when the agent stopped; tmux clears it once the window is seen.
     pub bell: bool,
+    /// Open conversation log (pi-kit's @pi_session); empty before the first message.
+    pub session_file: String,
 }
 
 /// Tree node of a session: its path without helper segments (`__float`, `__agents`, 
@@ -49,6 +52,15 @@ fn node_of(session: &str) -> String {
 impl Agent {
     pub fn node(&self) -> String {
         node_of(&self.session)
+    }
+
+    /// Pin identity: the conversation log name, which a reboot restore keeps; else the pane.
+    pub fn pin_key(&self) -> String {
+        std::path::Path::new(&self.session_file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("pane:{}", self.pane))
     }
 
     /// Worker name, else `<helper> <window>`: `ws`, `float pi`, `agents tasks-web`.
@@ -102,13 +114,13 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}",
     ])
     .unwrap_or_default();
     raw.lines()
         .filter_map(|line| {
             let p: Vec<&str> = line.split('\t').collect();
-            if p.len() < 11 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
+            if p.len() < 12 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
                 return None;
             }
             Some(Agent {
@@ -121,6 +133,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
                 parent: p[7].to_string(),
                 bell: p[9] == "1",
                 name: p[10].to_string(),
+                session_file: p[11].to_string(),
             })
         })
         .collect()
@@ -131,7 +144,21 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
 pub(crate) enum ARow {
     Project { name: String, depth: usize, agents: usize, working: usize, finished: usize, expanded: bool },
     /// `working`/`finished` count hidden descendants while folded (`expanded` false).
-    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, finished: usize },
+    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, finished: usize, pinned: bool },
+}
+
+/// What a row layout depends on besides the agents.
+pub(crate) struct Layout<'a> {
+    pub expanded: &'a HashMap<String, bool>,
+    pub pins: &'a HashSet<String>,
+    pub order: &'a [String],
+    pub current: &'a str,
+}
+
+struct Tree<'a> {
+    agents: &'a [Agent],
+    children: HashMap<&'a str, Vec<usize>>,
+    layout: &'a Layout<'a>,
 }
 
 impl ARow {
@@ -169,10 +196,17 @@ fn in_subtree(node: &str, root: &str) -> bool {
     node == root || node.starts_with(&format!("{}/", root))
 }
 
-/// Rows: the session tree (`dgt` \u{2192} `dgt/eclion`), current branch first, each node's own
-/// agents as a spawn tree before its child nodes. A parent that is not a live agent
-/// (recruited pane, gone, or after a reboot) makes the agent a root of its node.
-pub(crate) fn build_rows(agents: &[Agent], expanded: &HashMap<String, bool>, current: &str) -> Vec<ARow> {
+/// Sibling order: the saved order first, then the current branch, then by name.
+fn node_sort_key(n: &str, order: &[String], current: &str) -> (usize, bool, String) {
+    (order.iter().position(|o| o == n).unwrap_or(usize::MAX), !in_subtree(current, n), n.to_string())
+}
+
+/// Rows: the session tree (`dgt` \u{2192} `dgt/eclion`), each node's own agents as a spawn
+/// tree before its child nodes. A parent that is not a live agent (recruited pane, gone,
+/// or after a reboot) makes the agent a root of its node. Pinned agents stay listed
+/// under a collapsed project or a folded parent.
+pub(crate) fn build_rows(agents: &[Agent], layout: &Layout) -> Vec<ARow> {
+    let (expanded, current) = (layout.expanded, layout.current);
     let live: HashSet<&str> = agents.iter().map(|a| a.pane.as_str()).collect();
     let nodes_of: Vec<String> = agents.iter().map(Agent::node).collect();
     let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -204,10 +238,10 @@ pub(crate) fn build_rows(agents: &[Agent], expanded: &HashMap<String, bool>, cur
         let parent = n.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
         kids.entry(parent).or_default().push(n.clone());
     }
-    // Branch holding the current session first, then by name.
     for list in kids.values_mut() {
-        list.sort_by_key(|n| (!in_subtree(current, n), n.clone()));
+        list.sort_by_key(|n| node_sort_key(n, layout.order, current));
     }
+    let tree = Tree { agents, children, layout };
 
     let mut rows = Vec::new();
     let mut seen = HashSet::new();
@@ -223,13 +257,18 @@ pub(crate) fn build_rows(agents: &[Agent], expanded: &HashMap<String, bool>, cur
             finished: members.iter().filter(|&&i| agents[i].finished()).count(),
             expanded: open,
         });
-        if !open {
-            continue;
-        }
         // One step past the project's arrow, plus room for an agent's own fold arrow.
         let lead = "  ".repeat(depth + 2);
+        if !open {
+            let mut pinned: Vec<usize> = members.into_iter().filter(|&i| tree.pinned(i)).collect();
+            pinned.sort_by_key(|&i| window_order(&agents[i]));
+            for i in pinned {
+                push_tree(&mut rows, &tree, i, &lead, None, &mut seen);
+            }
+            continue;
+        }
         for &root in roots.get(node.as_str()).map(Vec::as_slice).unwrap_or(&[]) {
-            push_tree(&mut rows, agents, &children, expanded, root, &lead, None, &mut seen);
+            push_tree(&mut rows, &tree, root, &lead, None, &mut seen);
         }
         for child in kids.get(&node).cloned().unwrap_or_default().into_iter().rev() {
             stack.push((child, depth + 1));
@@ -238,34 +277,35 @@ pub(crate) fn build_rows(agents: &[Agent], expanded: &HashMap<String, bool>, cur
     rows
 }
 
-/// Every agent below `idx` in the spawn tree.
-fn descendants(agents: &[Agent], children: &HashMap<&str, Vec<usize>>, idx: usize, seen: &mut HashSet<usize>, out: &mut Vec<usize>) {
-    for &kid in children.get(agents[idx].pane.as_str()).map(Vec::as_slice).unwrap_or(&[]) {
-        if seen.insert(kid) {
-            out.push(kid);
-            descendants(agents, children, kid, seen, out);
+impl Tree<'_> {
+    fn kids(&self, idx: usize) -> Vec<usize> {
+        self.children.get(self.agents[idx].pane.as_str()).cloned().unwrap_or_default()
+    }
+
+    fn pinned(&self, idx: usize) -> bool {
+        self.layout.pins.contains(&self.agents[idx].pin_key())
+    }
+
+    /// Every agent below `idx` in the spawn tree, depth first.
+    fn descendants(&self, idx: usize, seen: &mut HashSet<usize>, out: &mut Vec<usize>) {
+        for kid in self.kids(idx) {
+            if seen.insert(kid) {
+                out.push(kid);
+                self.descendants(kid, seen, out);
+            }
         }
     }
 }
 
 /// `last`: None for a root, else whether this is its parent's last child. An agent with
 /// workers shows ▸/▾ in place of its branch dash (or of the root's indent).
-#[allow(clippy::too_many_arguments)]
-fn push_tree(
-    rows: &mut Vec<ARow>,
-    agents: &[Agent],
-    children: &HashMap<&str, Vec<usize>>,
-    expanded: &HashMap<String, bool>,
-    idx: usize,
-    lead: &str,
-    last: Option<bool>,
-    seen: &mut HashSet<usize>,
-) {
+fn push_tree(rows: &mut Vec<ARow>, tree: &Tree, idx: usize, lead: &str, last: Option<bool>, seen: &mut HashSet<usize>) {
     if !seen.insert(idx) {
         return;
     }
-    let kids = children.get(agents[idx].pane.as_str()).cloned().unwrap_or_default();
-    let open = agent_expanded(expanded, &agents[idx].pane);
+    let agents = tree.agents;
+    let kids = tree.kids(idx);
+    let open = agent_expanded(tree.layout.expanded, &agents[idx].pane);
     let fold = match (kids.is_empty(), open) {
         (true, _) => None,
         (false, true) => Some("▾"),
@@ -278,16 +318,13 @@ fn push_tree(
         (Some(l), f) => format!("{}{}{} ", lead, if l { "└" } else { "├" }, f.unwrap_or("─")),
     };
     let (mut working, mut finished) = (0, 0);
+    let mut hidden = Vec::new();
     if !open {
-        let mut hidden = Vec::new();
-        descendants(agents, children, idx, &mut seen.clone(), &mut hidden);
+        tree.descendants(idx, &mut seen.clone(), &mut hidden);
         working = hidden.iter().filter(|&&i| agents[i].working()).count();
         finished = hidden.iter().filter(|&&i| agents[i].finished()).count();
     }
-    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, finished });
-    if !open {
-        return;
-    }
+    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, finished, pinned: tree.pinned(idx) });
     // Children hang under the parent's name, not its dot: a connector in the dot's column
     // reads as a sibling.
     let below = format!(
@@ -299,8 +336,10 @@ fn push_tree(
             None => "  ",
         }
     );
-    for (n, kid) in kids.iter().enumerate() {
-        push_tree(rows, agents, children, expanded, *kid, &below, Some(n + 1 == kids.len()), seen);
+    // Folded: only pinned workers stay listed.
+    let shown: Vec<usize> = if open { kids } else { hidden.into_iter().filter(|&i| tree.pinned(i)).collect() };
+    for (n, kid) in shown.iter().enumerate() {
+        push_tree(rows, tree, *kid, &below, Some(n + 1 == shown.len()), seen);
     }
 }
 
@@ -329,34 +368,41 @@ fn state_text(a: &Agent) -> String {
     format!("{} {}", a.state, age(a.state_at)).trim_end().to_string()
 }
 
-/// One list row, plain text plus its colour. Columns: tree, ●/○, label, state + age, ⑂ children.
+/// ` ●3 ●1`: working in green, finished in purple, zeros left out; `base` is restored
+/// after each.
+fn counts(working: usize, finished: usize, base: &str) -> String {
+    let mut s = String::new();
+    if working > 0 {
+        s.push_str(&format!(" \x1b[0m{}●{}\x1b[0m{}", WORKING, working, base));
+    }
+    if finished > 0 {
+        s.push_str(&format!(" \x1b[0m{}●{}\x1b[0m{}", FINISHED, finished, base));
+    }
+    s
+}
+
+fn label_with_pin(a: &Agent, pinned: bool) -> String {
+    if pinned { format!("{} {}", a.label(), PIN) } else { a.label() }
+}
+
+/// One list row (may hold colour codes) plus its base colour. Columns: tree, ●/○, label, state + age, ⑂ children.
 fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static str) {
     match row {
         ARow::Project { name, depth, agents: n, working, finished, expanded } => {
             let arrow = if *expanded { "▾" } else { "▸" };
             let leaf = name.rsplit('/').next().unwrap_or(name);
-            let busy = if *working > 0 { format!(" · {} working", working) } else { String::new() };
-            let done = if *finished > 0 { format!(" · {} finished", finished) } else { String::new() };
-            (
-                format!("{}{} {}  {} agent{}{}{}", "  ".repeat(*depth), arrow, leaf, n, if *n == 1 { "" } else { "s" }, busy, done),
-                // A collapsed branch hiding finished agents takes their colour.
-                if *finished > 0 && !*expanded { FINISHED } else { PROJECT_COLOR },
-            )
+            // A collapsed branch hiding finished agents takes their colour.
+            let base = if *finished > 0 && !*expanded { FINISHED } else { PROJECT_COLOR };
+            (format!("{}{} {}  {}{}", "  ".repeat(*depth), arrow, leaf, n, counts(*working, *finished, base)), base)
         }
-        ARow::Agent { idx, prefix, children, working, finished, .. } => {
+        ARow::Agent { idx, prefix, children, working, finished, pinned, .. } => {
             let a = &agents[*idx];
-            let head = format!("{}{} {}", prefix, a.dot(), a.label());
+            let head = format!("{}{} {}", prefix, a.dot(), label_with_pin(a, *pinned));
             let pad = name_w.saturating_sub(text_width(&head));
-            let mut kids = if *children > 0 { format!("   ⑂ {}", children) } else { String::new() };
-            if *working > 0 {
-                kids.push_str(&format!(" · {} working", working));
-            }
-            if *finished > 0 {
-                kids.push_str(&format!(" · {} finished", finished));
-            }
-            let text = format!("{}{}  {:<12}{}", head, " ".repeat(pad), state_text(a), kids);
             // A folded agent hiding finished workers takes their colour.
-            (text, if *finished > 0 { FINISHED } else { a.colour() })
+            let base = if *finished > 0 { FINISHED } else { a.colour() };
+            let kids = if *children > 0 { format!("   ⑂ {}{}", children, counts(*working, *finished, base)) } else { String::new() };
+            (format!("{}{}  {:<12}{}", head, " ".repeat(pad), state_text(a), kids), base)
         }
     }
 }
@@ -414,7 +460,7 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
     let name_w = rows
         .iter()
         .filter_map(|r| match r {
-            ARow::Agent { idx, prefix, .. } => Some(text_width(prefix) + 2 + text_width(&agents[*idx].label())),
+            ARow::Agent { idx, prefix, pinned, .. } => Some(text_width(prefix) + 2 + text_width(&label_with_pin(&agents[*idx], *pinned))),
             _ => None,
         })
         .max()
@@ -433,14 +479,14 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
     for y in 0..body_h {
         let content_w = list_w.saturating_sub(1);
         if y + 1 == body_h {
-            let hint = " A overview · enter go · h/l fold · v preview · +/- width · q quit";
+            let hint = " A overview · enter go · h/l fold · p pin · J/K order · v preview · +/- width · q quit";
             out.push_str(&format!("{}{}\x1b[0m", RULE, fit(hint, list_w)));
         } else if let Some(row) = rows.get(offset + y) {
             let (text, colour) = row_text(row, agents, name_w);
             if offset + y == selected {
-                out.push_str(&format!("{} {}\x1b[0m", SELECTED, fit(&text, content_w)));
+                out.push_str(&format!("{} {}\x1b[0m", SELECTED, fit(&strip_ansi(&text), content_w)));
             } else {
-                out.push_str(&format!("{} {}\x1b[0m", colour, fit(&text, content_w)));
+                out.push_str(&format!("{} {}\x1b[0m", colour, ansi_fit(&text, content_w)));
             }
         } else if rows.is_empty() && y == 0 {
             out.push_str(&fit(" no pi agents running", list_w));
@@ -482,7 +528,12 @@ pub(crate) fn run<A, B>(
     let current = current_project();
     let mut list_percent = 40usize;
     let mut agents = collect_agents();
-    let mut rows = build_rows(&agents, expanded, &current);
+    let mut pins = crate::state::load_agent_pins();
+    let mut order = crate::state::load_agents_order();
+    let rows_for = |agents: &[Agent], expanded: &HashMap<String, bool>, pins: &HashSet<String>, order: &[String]| {
+        build_rows(agents, &Layout { expanded, pins, order, current: &current })
+    };
+    let mut rows = rows_for(&agents, expanded, &pins, &order);
     // Start on the first agent of the current project, else the first row.
     let mut selected = rows.iter().position(|r| matches!(r, ARow::Agent { .. })).unwrap_or(0);
     let mut last_refresh = Instant::now();
@@ -494,7 +545,7 @@ pub(crate) fn run<A, B>(
         if last_refresh.elapsed().as_millis() >= REFRESH_MS {
             let key = rows.get(selected).map(|r| r.key(&agents));
             agents = collect_agents();
-            rows = build_rows(&agents, expanded, &current);
+            rows = rows_for(&agents, expanded, &pins, &order);
             if let Some(i) = key.and_then(|k| select_key(&rows, &agents, &k)) {
                 selected = i;
             }
@@ -555,10 +606,42 @@ pub(crate) fn run<A, B>(
                     _ => continue,
                 }
                 let key = rows.get(selected).map(|r| r.key(&agents));
-                rows = build_rows(&agents, expanded, &current);
+                rows = rows_for(&agents, expanded, &pins, &order);
                 if let Some(i) = key.and_then(|k| select_key(&rows, &agents, &k)) {
                     selected = i;
                 }
+            }
+            b"p" => {
+                let Some(ARow::Agent { idx, .. }) = rows.get(selected).cloned() else { continue };
+                let key = agents[idx].pin_key();
+                if !pins.remove(&key) {
+                    pins.insert(key);
+                }
+                crate::state::save_agent_pins(&pins);
+                rows = rows_for(&agents, expanded, &pins, &order);
+            }
+            // Move the selected project among its siblings; the whole sibling order is saved.
+            b"J" | b"K" => {
+                let Some(ARow::Project { name, .. }) = rows.get(selected).cloned() else { continue };
+                let parent = name.rsplit_once('/').map(|(p, _)| p.to_string()).unwrap_or_default();
+                let mut siblings: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| match r {
+                        ARow::Project { name: n, .. } if n.rsplit_once('/').map(|(p, _)| p).unwrap_or("") == parent => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let Some(at) = siblings.iter().position(|n| *n == name) else { continue };
+                let to = if key.as_slice() == b"J" { at + 1 } else { at.wrapping_sub(1) };
+                if to >= siblings.len() {
+                    continue;
+                }
+                siblings.swap(at, to);
+                order.retain(|n| !siblings.contains(n));
+                order.extend(siblings);
+                crate::state::save_agents_order(&order);
+                rows = rows_for(&agents, expanded, &pins, &order);
+                selected = select_key(&rows, &agents, &format!("p:{}", name)).unwrap_or(selected);
             }
             b"\r" | b"\n" => match rows.get(selected).cloned() {
                 Some(ARow::Agent { idx, .. }) => {
@@ -570,7 +653,7 @@ pub(crate) fn run<A, B>(
                 }
                 Some(ARow::Project { name, .. }) => {
                     toggle(expanded, &name, None);
-                    rows = build_rows(&agents, expanded, &current);
+                    rows = rows_for(&agents, expanded, &pins, &order);
                 }
                 None => {}
             },
