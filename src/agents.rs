@@ -241,13 +241,15 @@ fn push_tree(
     }
     let kids = children.get(agents[idx].pane.as_str()).cloned().unwrap_or_default();
     rows.push(ARow::Agent { idx, prefix: format!("{}{}", lead, branch), children: kids.len() });
+    // Children hang under the parent's name, not its dot: a connector in the dot's column
+    // reads as a sibling.
     let below = format!(
         "{}{}",
         lead,
         match branch.as_str() {
-            "├─ " => "│  ",
-            "└─ " => "   ",
-            _ => "",
+            "├─ " => "│    ",
+            "└─ " => "     ",
+            _ => "  ",
         }
     );
     for (n, kid) in kids.iter().enumerate() {
