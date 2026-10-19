@@ -974,6 +974,13 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     set(orch, { "@agent_kind": "pi", "@agent_state": "idle", "@pi_session": "/x/2026_conv-orch.jsonl" });
     set(pane(`${first}/__agents:worker`), { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1" });
     set(pane(`${second}:solo`), { "@agent_kind": "pi", "@agent_state": "idle" });
+    // A finished worker (idle, bell not yet seen) must not flag its project or parent.
+    const done = f.tmux(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${first}/__agents:`, "-n", "done", "/bin/sh"]).stdout.trim();
+    expect(done).toStartWith("%");
+    set(done, { "@agent_kind": "pi", "@agent_state": "idle", "@agent_parent": orch, "@agent_name": "w2" });
+    f.tmux(["send-keys", "-l", "-t", done, "printf '\\a'"]);
+    f.tmux(["send-keys", "-t", done, "C-m"]);
+    await f.waitUntil("worker bell", () => f.tmux(["display-message", "-p", "-t", done, "#{window_bell_flag}"]).stdout.trim() === "1");
 
     await f.launchOverview();
     f.sendRunnerKey("A");
@@ -990,18 +997,21 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     };
 
     // Neither project holds the runner session, so both start collapsed; counts are compact.
-    await f.waitUntil("collapsed projects", () => f.runnerContains(`\u25b8 ${first}  2 \u25cf1`));
+    // 3 agents, 1 working; the finished worker adds no purple count.
+    await f.waitUntil("collapsed projects", () => f.runnerContains(`\u25b8 ${first}  3 \u25cf1 `));
+    expect(f.captureRunner()).not.toContain(`\u25b8 ${first}  3 \u25cf1 \u25cf`);
     expect(f.captureRunner()).toContain(`\u25b8 ${second}  1`);
 
     // Unfolding the project shows the orchestrator with its worker folded under it.
     await select(first);
     f.sendRunnerKey("l");
-    await f.waitUntil("folded orchestrator", () => f.runnerContains("\u2442 1 \u25cf1"));
+    await f.waitUntil("folded orchestrator", () => f.runnerContains("\u2442 2 \u25cf1 "));
+    expect(f.captureRunner()).not.toContain("\u2442 2 \u25cf1 \u25cf");
     // (The project preview on the right still lists w1; the tree row does not.)
     expect(f.captureRunner()).not.toContain("\u2500 \u25cf w1");
     await select("orch");
     f.sendRunnerKey("l");
-    await f.waitUntil("worker under orchestrator", () => f.runnerContains("\u2514\u2500 \u25cf w1"));
+    await f.waitUntil("worker under orchestrator", () => f.runnerContains("\u2500 \u25cf w1"));
 
     // A pin keeps the agent listed under its collapsed project, keyed by its conversation.
     f.sendRunnerKey("p");

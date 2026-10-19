@@ -143,8 +143,9 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
 #[derive(Clone)]
 pub(crate) enum ARow {
     Project { name: String, depth: usize, agents: usize, working: usize, finished: usize, expanded: bool },
-    /// `working`/`finished` count hidden descendants while folded (`expanded` false).
-    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, finished: usize, pinned: bool },
+    /// `working` counts hidden descendants while folded (`expanded` false). A finished worker
+    /// is not flagged on its parent: only top-level agents waiting on the user matter.
+    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, pinned: bool },
 }
 
 /// What a row layout depends on besides the agents.
@@ -254,7 +255,8 @@ pub(crate) fn build_rows(agents: &[Agent], layout: &Layout) -> Vec<ARow> {
             depth,
             agents: members.len(),
             working: members.iter().filter(|&&i| agents[i].working()).count(),
-            finished: members.iter().filter(|&&i| agents[i].finished()).count(),
+            // Only top-level agents: a worker finishing reports to its parent, not the user.
+            finished: members.iter().filter(|&&i| agents[i].finished() && !tree.is_worker(i)).count(),
             expanded: open,
         });
         // One step past the project's arrow, plus room for an agent's own fold arrow.
@@ -280,6 +282,10 @@ pub(crate) fn build_rows(agents: &[Agent], layout: &Layout) -> Vec<ARow> {
 impl Tree<'_> {
     fn kids(&self, idx: usize) -> Vec<usize> {
         self.children.get(self.agents[idx].pane.as_str()).cloned().unwrap_or_default()
+    }
+
+    fn is_worker(&self, idx: usize) -> bool {
+        self.children.values().any(|kids| kids.contains(&idx))
     }
 
     fn pinned(&self, idx: usize) -> bool {
@@ -317,14 +323,13 @@ fn push_tree(rows: &mut Vec<ARow>, tree: &Tree, idx: usize, lead: &str, last: Op
         (None, Some(f)) => format!("{}{} ", &lead[..lead.len().saturating_sub(2)], f),
         (Some(l), f) => format!("{}{}{} ", lead, if l { "└" } else { "├" }, f.unwrap_or("─")),
     };
-    let (mut working, mut finished) = (0, 0);
+    let mut working = 0;
     let mut hidden = Vec::new();
     if !open {
         tree.descendants(idx, &mut seen.clone(), &mut hidden);
         working = hidden.iter().filter(|&&i| agents[i].working()).count();
-        finished = hidden.iter().filter(|&&i| agents[i].finished()).count();
     }
-    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, finished, pinned: tree.pinned(idx) });
+    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, pinned: tree.pinned(idx) });
     // Children hang under the parent's name, not its dot: a connector in the dot's column
     // reads as a sibling.
     let below = format!(
@@ -391,17 +396,16 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static st
         ARow::Project { name, depth, agents: n, working, finished, expanded } => {
             let arrow = if *expanded { "▾" } else { "▸" };
             let leaf = name.rsplit('/').next().unwrap_or(name);
-            // A collapsed branch hiding finished agents takes their colour.
+            // A collapsed branch hiding a finished top-level agent takes its colour.
             let base = if *finished > 0 && !*expanded { FINISHED } else { PROJECT_COLOR };
             (format!("{}{} {}  {}{}", "  ".repeat(*depth), arrow, leaf, n, counts(*working, *finished, base)), base)
         }
-        ARow::Agent { idx, prefix, children, working, finished, pinned, .. } => {
+        ARow::Agent { idx, prefix, children, working, pinned, .. } => {
             let a = &agents[*idx];
             let head = format!("{}{} {}", prefix, a.dot(), label_with_pin(a, *pinned));
             let pad = name_w.saturating_sub(text_width(&head));
-            // A folded agent hiding finished workers takes their colour.
-            let base = if *finished > 0 { FINISHED } else { a.colour() };
-            let kids = if *children > 0 { format!("   ⑂ {}{}", children, counts(*working, *finished, base)) } else { String::new() };
+            let base = a.colour();
+            let kids = if *children > 0 { format!("   ⑂ {}{}", children, counts(*working, 0, base)) } else { String::new() };
             (format!("{}{}  {:<12}{}", head, " ".repeat(pad), state_text(a), kids), base)
         }
     }
