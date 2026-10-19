@@ -47,6 +47,15 @@ fn save_boolean_state(name: &str, value: bool) {
     let _ = fs::write(path, if value { "1\n" } else { "0\n" });
 }
 
+/// Last screen used: the agents tree (`A`) or the session overview.
+pub(crate) fn load_agents_mode_state() -> bool {
+    load_boolean_state("agents-mode", false)
+}
+
+pub(crate) fn save_agents_mode_state(value: bool) {
+    save_boolean_state("agents-mode", value);
+}
+
 pub(crate) fn load_show_stats_state() -> bool {
     load_boolean_state("show-stats", true)
 }

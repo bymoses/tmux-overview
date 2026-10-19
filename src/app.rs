@@ -10,6 +10,7 @@ use crate::model::{Modal, ModalKeyResult, ProcStats, Row, Session};
 use crate::render::{help_modal, render};
 use crate::rows::{add_modal_for, clamp_selected, default_path_modal_for, delete_modal_for, first_selectable, is_selectable, kill_session_modal_for, last_selectable, load_rows, reload_rows_into, reload_saved_rows_clamped, rename_modal_for, row_key, row_target, selectable_after, selectable_before, selected_index_for_current_window, selected_index_for_key};
 use crate::saved::{load_saved_sessions, restore_saved_session, save_session_snapshot};
+use crate::state::{load_agents_mode_state, save_agents_mode_state};
 use crate::state::{load_cursor_key, load_expanded_state, load_preview_percent_state, load_show_hidden_state, load_show_preview_state, load_show_stats_state, load_show_tree_state, load_watchlist_state, save_cursor_key, save_expanded_state, save_preview_percent_state, save_show_hidden_state, save_show_preview_state, save_show_stats_state, save_show_tree_state, save_watchlist_state};
 use crate::stats::{collect_pane_snapshot, collect_proc_stats};
 use crate::terminal::{read_key_timeout, TerminalGuard};
@@ -56,6 +57,7 @@ pub(crate) fn run() -> io::Result<()> {
     let mut show_stats = load_show_stats_state();
     let mut show_hidden = load_show_hidden_state();
     let mut show_tree = load_show_tree_state();
+    let mut agents_mode = load_agents_mode_state();
     let mut message = String::from("stats are collected in the background");
     let mut modal = Modal::None;
 
@@ -101,6 +103,19 @@ pub(crate) fn run() -> io::Result<()> {
 
     let mut dirty = true;
     loop {
+        if agents_mode {
+            match crate::agents::run(&mut expanded, &mut show_preview, &stats_rx, &labels_rx)? {
+                crate::agents::Exit::Quit => break,
+                crate::agents::Exit::Overview => {
+                    agents_mode = false;
+                    save_agents_mode_state(false);
+                    window_labels = collect_pane_snapshot();
+                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
+                    message = String::from("overview");
+                    dirty = true;
+                }
+            }
+        }
         while let Ok((new_session_stats, new_window_stats)) = stats_rx.try_recv() {
             session_stats = new_session_stats;
             window_stats = new_window_stats;
@@ -223,6 +238,10 @@ pub(crate) fn run() -> io::Result<()> {
                     clamp_selected(&mut selected, &rows);
                     dirty = true;
                 }
+            }
+            b"A" => {
+                agents_mode = true;
+                save_agents_mode_state(true);
             }
             b"v" => {
                 show_preview = !show_preview;

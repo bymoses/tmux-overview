@@ -322,6 +322,7 @@ pub(crate) fn help_modal() -> Modal {
         title: "tmux overview help".to_string(),
         lines: vec![
             "enter switch/restore".to_string(),
+            "A agents tree".to_string(),
             "j/k or arrows move".to_string(),
             "g/G first/last".to_string(),
             "h/l or arrows fold/unfold".to_string(),
@@ -508,6 +509,7 @@ pub(crate) fn render(
         message.to_string(),
         String::new(),
         "enter switch".to_string(),
+        "A agents".to_string(),
         "j/k move".to_string(),
         "h/l fold".to_string(),
         "+/- resize".to_string(),
