@@ -2,15 +2,116 @@ use crate::model::{Row, SavedSession};
 use crate::tmux_api::tmux;
 use crate::util::{plain_truncate, session_display_name, text_width, visible_truncate_ansi};
 
+/// `-N` keeps trailing blanks: a full-width background (pi's message boxes) is made of
+/// blank cells, and without it the box shrank to the text. Lines are made self-contained
+/// because `-e` writes attributes as changes carried over from the previous line.
 pub(crate) fn capture_preview(target: &str, lines: usize) -> Vec<String> {
     let start = format!("-{}", lines.saturating_mul(2).max(lines));
-    let out = tmux(&["capture-pane", "-ep", "-S", &start, "-t", target]).unwrap_or_default();
-    tail_nonempty_lines(&out, lines)
+    let out = tmux(&["capture-pane", "-epN", "-S", &start, "-t", target]).unwrap_or_default();
+    tail_nonempty_lines(&self_contained_lines(&out).join("\n"), lines)
+}
+
+/// SGR state at a point of the stream, to restate at the start of each line.
+#[derive(Default, Clone)]
+struct Sgr {
+    attrs: [bool; 10],
+    fg: Option<String>,
+    bg: Option<String>,
+    ul: Option<String>,
+}
+
+impl Sgr {
+    fn apply(&mut self, params: &str) {
+        let p: Vec<&str> = if params.is_empty() { vec!["0"] } else { params.split(';').collect() };
+        let mut i = 0;
+        while i < p.len() {
+            let tok = p[i];
+            // 38;5;n / 38;2;r;g;b span several params; the colon forms are one token.
+            let ext = |i: usize| -> (String, usize) {
+                match p.get(i + 1).copied() {
+                    Some("5") if i + 2 < p.len() => (p[i..=i + 2].join(";"), 3),
+                    Some("2") if i + 4 < p.len() => (p[i..=i + 4].join(";"), 5),
+                    _ => (tok.to_string(), 1),
+                }
+            };
+            let head = tok.split(':').next().unwrap_or("");
+            let n: u32 = head.parse().unwrap_or(0);
+            let mut step = 1;
+            match n {
+                0 => *self = Sgr::default(),
+                1..=9 => self.attrs[n as usize] = true,
+                21 => self.attrs[4] = true,
+                22 => (self.attrs[1], self.attrs[2]) = (false, false),
+                23 => self.attrs[3] = false,
+                24 => self.attrs[4] = false,
+                25 => (self.attrs[5], self.attrs[6]) = (false, false),
+                27 => self.attrs[7] = false,
+                28 => self.attrs[8] = false,
+                29 => self.attrs[9] = false,
+                30..=37 | 90..=97 => self.fg = Some(tok.to_string()),
+                39 => self.fg = None,
+                40..=47 | 100..=107 => self.bg = Some(tok.to_string()),
+                49 => self.bg = None,
+                38 | 48 | 58 => {
+                    let (code, used) = if tok.contains(':') { (tok.to_string(), 1) } else { ext(i) };
+                    step = used;
+                    match n {
+                        38 => self.fg = Some(code),
+                        48 => self.bg = Some(code),
+                        _ => self.ul = Some(code),
+                    }
+                }
+                59 => self.ul = None,
+                _ => {}
+            }
+            if tok.contains(':') && n == 4 {
+                self.attrs[4] = !tok.ends_with(":0"); // 4:0 = no underline, 4:3 curly
+            }
+            i += step;
+        }
+    }
+
+    fn restate(&self) -> String {
+        let mut parts: Vec<String> = (1..10).filter(|&a| self.attrs[a]).map(|a| a.to_string()).collect();
+        for c in vec![&self.fg, &self.bg, &self.ul] {
+            if let Some(c) = c {
+                parts.push(c.clone());
+            }
+        }
+        if parts.is_empty() { String::new() } else { format!("\x1b[{}m", parts.join(";")) }
+    }
+}
+
+/// Each line starts with the SGR state the previous lines left, so it renders alone.
+fn self_contained_lines(text: &str) -> Vec<String> {
+    let mut state = Sgr::default();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        out.push(format!("{}{}", state.restate(), line));
+        let b = line.as_bytes();
+        let mut i = 0;
+        while i + 1 < b.len() {
+            if b[i] == 0x1b && b[i + 1] == b'[' {
+                let mut j = i + 2;
+                while j < b.len() && !(0x40..=0x7e).contains(&b[j]) {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'm' {
+                    state.apply(&line[i + 2..j]);
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 pub(crate) fn tail_nonempty_lines(text: &str, lines: usize) -> Vec<String> {
     let mut v: Vec<String> = text.lines().map(|s| s.to_string()).collect();
-    while v.last().is_some_and(|s| s.trim().is_empty()) {
+    // -N pads every line and lines start with SGR codes, so judge by visible text.
+    while v.last().is_some_and(|s| crate::util::strip_ansi(s).trim().is_empty()) {
         v.pop();
     }
     if v.len() > lines {

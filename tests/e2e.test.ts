@@ -349,6 +349,28 @@ e2e("startup rendering hides _popup_* sessions", async () => {
   });
 }, TEST_TIMEOUT_MS);
 
+// capture-pane -e writes attributes as changes carried across lines and trims blank
+// cells; pi's message boxes are a background spanning lines and the full width.
+e2e("preview keeps backgrounds that span lines and the full width", async () => {
+  await withFixture("bgspan", async (f) => {
+    const session = `alpha_bg_${process.pid}`;
+    await f.createSessionWithOutput(session, "main", "BG_READY");
+    const pane = `${session}:main.0`;
+    f.tmux(["send-keys", "-l", "-t", pane, "clear; printf '\\033[48;2;10;20;30mBGTOP\\033[K\\nBGNEXT\\033[K\\033[0m\\nPLAIN\\n'"]);
+    f.tmux(["send-keys", "-t", pane, "C-m"]);
+    await f.waitUntil("pane output", () => f.paneContains(pane, "PLAIN"), 3_000);
+
+    await f.launchOverview();
+    f.sendRunnerKey("g");
+    await f.waitUntil("preview content", () => f.runnerContains("BGNEXT"));
+    const lines = f.captureRunnerAnsi().split("\n");
+    const next = lines.find((l) => l.includes("BGNEXT"))!;
+    expect(next).toMatch(/48;2;10;20;30m[^\x1b]*BGNEXT/); // restated on its own line
+    expect(next).toMatch(/BGNEXT {4}/); // the blank cells after the text keep the background
+    expect(lines.find((l) => l.includes("PLAIN"))!).not.toMatch(/48;2;10;20;30m[^\x1b]*PLAIN/);
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("navigation, preview resize, and preview toggle", async () => {
   await withFixture("navigation", async (f) => {
     const session = `alpha_nav_${process.pid}`;
