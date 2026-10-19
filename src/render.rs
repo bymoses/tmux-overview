@@ -18,6 +18,8 @@ pub(crate) fn session_expanded(row: &Row, expanded: &HashMap<String, bool>) -> b
 }
 
 const ALERT_COLOR: &str = "\x1b[1;38;2;255;100;150m";
+/// Same red as agents mode's failed agents.
+const ERROR_COLOR: &str = "\x1b[1;38;5;203m";
 
 fn format_age(seconds: u64) -> String {
     if seconds >= 3600 {
@@ -37,15 +39,20 @@ fn now_epoch() -> u64 {
 }
 
 /// Bright badge for an agent that stopped and has not been reviewed yet.
+/// A failed run (pi-kit's "error" state) is red with \u{2717}, apart from a plain stop.
 fn alert_badge(alert: &AgentAlert) -> String {
-    let glyph = if alert.state == "exited" { "◌" } else { "●" };
+    let (glyph, colour) = match alert.state.as_str() {
+        "error" => ("\u{2717}", ERROR_COLOR),
+        "exited" => ("\u{25cc}", ALERT_COLOR),
+        _ => ("\u{25cf}", ALERT_COLOR),
+    };
     let count = if alert.panes > 1 { alert.panes.to_string() } else { String::new() };
     let age = if alert.idle_at > 0 {
         format!(" {}", format_age(now_epoch().saturating_sub(alert.idle_at)))
     } else {
         String::new()
     };
-    format!("{} {}{}{}\x1b[0m", ALERT_COLOR, glyph, count, age)
+    format!("{} {}{}{}\x1b[0m", colour, glyph, count, age)
 }
 
 pub(crate) fn format_cpu(stats: &ProcStats) -> String {

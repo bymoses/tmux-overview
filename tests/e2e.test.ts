@@ -989,6 +989,9 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     set(w1, { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1", "@agent_bg": "2" });
     // Resting on its own bg job: amber, counted apart from idle.
     set(pane(`${second}:solo`), { "@agent_kind": "pi", "@agent_state": "waiting" });
+    // A run that stopped on a failed request: red \u2717, counted on its project.
+    const failed = f.tmux(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${second}:`, "-n", "failed", "/bin/sh"]).stdout.trim();
+    set(failed, { "@agent_kind": "pi", "@agent_state": "error", "@agent_error": "Connection error." });
     // A finished worker (idle, bell not yet seen) must not flag its project or parent.
     const done = f.tmux(["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${first}/__agents:`, "-n", "done", "/bin/sh"]).stdout.trim();
     expect(done).toStartWith("%");
@@ -1015,7 +1018,7 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     // 3 agents, 1 working; the finished worker adds no purple count.
     await f.waitUntil("collapsed projects", () => f.runnerContains(`\u25b8 ${first}  3 \u25cf1 `));
     expect(f.captureRunner()).not.toContain(`\u25b8 ${first}  3 \u25cf1 \u25cf`);
-    expect(f.captureRunner()).toContain(`\u25b8 ${second}  1 \u25d01`);
+    expect(f.captureRunner()).toContain(`\u25b8 ${second}  2 \u25d01 \u27171`);
 
     // Unfolding the project shows the orchestrator with its worker folded under it.
     await select(first);

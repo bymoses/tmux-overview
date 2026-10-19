@@ -10,7 +10,7 @@ const AGENT_COMMANDS: [&str; 4] = ["pi", "claude", "codex", "aider"];
 
 fn agent_state_for(state: &str, command: &str) -> Option<String> {
     match state {
-        "idle" | "exited" | "blocked" => Some(state.to_string()),
+        "idle" | "exited" | "blocked" | "error" => Some(state.to_string()),
         "working" => None,
         "" if AGENT_COMMANDS.contains(&command) => Some("stopped".to_string()),
         _ => None,

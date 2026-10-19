@@ -17,6 +17,8 @@ const PROJECT_COLOR: &str = "\x1b[1;38;5;252m";
 const WORKING: &str = "\x1b[38;5;114m";
 /// Resting on its own bg job or scheduled check: it will wake by itself.
 const WAITING: &str = "\x1b[38;5;179m";
+/// The run stopped on a failed request (pi-kit's "error" state): look at it.
+const ERROR: &str = "\x1b[1;38;5;203m";
 /// Same colour as the overview's "stopped, not reviewed yet" badge.
 const FINISHED: &str = "\x1b[1;38;2;255;100;150m";
 const DIM: &str = "\x1b[38;5;244m";
@@ -50,6 +52,8 @@ pub(crate) struct Agent {
     pub session_file: String,
     /// pi-kit's @agent_bg: detached bash jobs and scheduled checks it is waiting for.
     pub bg: usize,
+    /// pi-kit's @agent_error: why the last run failed, while the state is "error".
+    pub error: String,
 }
 
 /// Tree node of a session: its path without helper segments (`__float`, `__agents`, 
@@ -98,13 +102,20 @@ impl Agent {
         self.state == "waiting"
     }
 
+    /// The last run ended on a failed request (connection, 5xx, auth).
+    fn errored(&self) -> bool {
+        self.state == "error"
+    }
+
     /// Stopped and not looked at yet, as in the overview's alert badge.
     fn finished(&self) -> bool {
-        self.bell && !self.working() && !self.waiting()
+        self.bell && !self.working() && !self.waiting() && !self.errored()
     }
 
     fn dot(&self) -> &'static str {
-        if self.waiting() {
+        if self.errored() {
+            "\u{2717}"
+        } else if self.waiting() {
             "\u{25d0}"
         } else if self.working() || self.finished() {
             "●"
@@ -114,7 +125,9 @@ impl Agent {
     }
 
     fn colour(&self) -> &'static str {
-        if self.finished() {
+        if self.errored() {
+            ERROR
+        } else if self.finished() {
             FINISHED
         } else if self.working() {
             WORKING
@@ -132,13 +145,13 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}\t#{@agent_error}",
     ])
     .unwrap_or_default();
     raw.lines()
         .filter_map(|line| {
             let p: Vec<&str> = line.split('\t').collect();
-            if p.len() < 14 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
+            if p.len() < 15 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
                 return None;
             }
             Some(Agent {
@@ -153,6 +166,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
                 name: p[10].to_string(),
                 session_file: p[11].to_string(),
                 bg: p[13].parse().unwrap_or(0),
+                error: p[14].to_string(),
             })
         })
         .collect()
@@ -161,10 +175,33 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
 /// `Project` is a session-tree node (`dgt`, `dgt/eclion`); counts cover its whole subtree.
 #[derive(Clone)]
 pub(crate) enum ARow {
-    Project { name: String, depth: usize, agents: usize, working: usize, waiting: usize, finished: usize, expanded: bool },
+    Project { name: String, depth: usize, agents: usize, counts: Counts, expanded: bool },
     /// `working` counts hidden descendants while folded (`expanded` false). A finished worker
     /// is not flagged on its parent: only top-level agents waiting on the user matter.
-    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, waiting: usize, pinned: bool },
+    Agent { idx: usize, prefix: String, children: usize, expanded: bool, counts: Counts, pinned: bool },
+}
+
+/// Agents per state, drawn as coloured counts; zeros left out.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Counts {
+    working: usize,
+    waiting: usize,
+    finished: usize,
+    errors: usize,
+}
+
+impl Counts {
+    /// `finished` only for agents `notify` accepts: a worker that finished reports to its parent.
+    fn of<'a>(list: impl Iterator<Item = &'a Agent>, notify: impl Fn(&Agent) -> bool) -> Counts {
+        let mut c = Counts::default();
+        for a in list {
+            c.working += a.working() as usize;
+            c.waiting += a.waiting() as usize;
+            c.finished += (a.finished() && notify(a)) as usize;
+            c.errors += a.errored() as usize;
+        }
+        c
+    }
 }
 
 /// What a row layout depends on besides the agents.
@@ -273,10 +310,8 @@ pub(crate) fn build_rows(agents: &[Agent], layout: &Layout) -> Vec<ARow> {
             name: node.clone(),
             depth,
             agents: members.len(),
-            working: members.iter().filter(|&&i| agents[i].working()).count(),
-            waiting: members.iter().filter(|&&i| agents[i].waiting()).count(),
-            // Only top-level agents: a worker finishing reports to its parent, not the user.
-            finished: members.iter().filter(|&&i| agents[i].finished() && !tree.is_worker(i)).count(),
+            // Finished: only top-level agents; a worker finishing reports to its parent, not the user.
+            counts: Counts::of(members.iter().map(|&i| &agents[i]), |a| !tree.is_worker_pane(&a.pane)),
             expanded: open,
         });
         // One step past the project's arrow, plus room for an agent's own fold arrow.
@@ -306,6 +341,10 @@ impl Tree<'_> {
 
     fn is_worker(&self, idx: usize) -> bool {
         self.children.values().any(|kids| kids.contains(&idx))
+    }
+
+    fn is_worker_pane(&self, pane: &str) -> bool {
+        self.agents.iter().position(|a| a.pane == pane).is_some_and(|i| self.is_worker(i))
     }
 
     fn pinned(&self, idx: usize) -> bool {
@@ -343,14 +382,14 @@ fn push_tree(rows: &mut Vec<ARow>, tree: &Tree, idx: usize, lead: &str, last: Op
         (None, Some(f)) => format!("{}{} ", &lead[..lead.len().saturating_sub(2)], f),
         (Some(l), f) => format!("{}{}{} ", lead, if l { "└" } else { "├" }, f.unwrap_or("─")),
     };
-    let (mut working, mut waiting) = (0, 0);
+    let mut counts = Counts::default();
     let mut hidden = Vec::new();
     if !open {
         tree.descendants(idx, &mut seen.clone(), &mut hidden);
-        working = hidden.iter().filter(|&&i| agents[i].working()).count();
-        waiting = hidden.iter().filter(|&&i| agents[i].waiting()).count();
+        // Hidden workers: busy and failed ones show; a finished worker reports to this parent.
+        counts = Counts::of(hidden.iter().map(|&i| &agents[i]), |_| false);
     }
-    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, waiting, pinned: tree.pinned(idx) });
+    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, counts, pinned: tree.pinned(idx) });
     // Children hang under the parent's name, not its dot: a connector in the dot's column
     // reads as a sibling.
     let below = format!(
@@ -398,13 +437,18 @@ fn state_text(a: &Agent) -> String {
 
 /// ` ●3 ●1`: working in green, finished in purple, zeros left out; `base` is restored
 /// after each.
-fn counts(working: usize, waiting: usize, finished: usize, base: &str) -> String {
+/// Working green, waiting amber, finished purple, failed red; zeros left out; `base` restored after each.
+fn counts(c: &Counts, base: &str) -> String {
+    let (working, waiting, finished) = (c.working, c.waiting, c.finished);
     let mut s = String::new();
     if working > 0 {
         s.push_str(&format!(" \x1b[0m{}●{}\x1b[0m{}", WORKING, working, base));
     }
     if waiting > 0 {
         s.push_str(&format!(" \x1b[0m{}\u{25d0}{}\x1b[0m{}", WAITING, waiting, base));
+    }
+    if c.errors > 0 {
+        s.push_str(&format!(" \x1b[0m{}\u{2717}{}\x1b[0m{}", ERROR, c.errors, base));
     }
     if finished > 0 {
         s.push_str(&format!(" \x1b[0m{}●{}\x1b[0m{}", FINISHED, finished, base));
@@ -426,15 +470,20 @@ fn label_with_pin(a: &Agent, pinned: bool, base: &str) -> String {
 /// One list row (may hold colour codes) plus its base colour. Columns: tree, ●/○, label, state + age, ⑂ children.
 fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static str) {
     match row {
-        ARow::Project { name, depth, agents: n, working, waiting, finished, expanded } => {
+        ARow::Project { name, depth, agents: n, counts: c, expanded } => {
             let arrow = if *expanded { "▾" } else { "▸" };
             let leaf = name.rsplit('/').next().unwrap_or(name);
             // A collapsed branch hiding a finished top-level agent takes its colour.
-            let base = if *finished > 0 && !*expanded { FINISHED } else { PROJECT_COLOR };
-            let counts = counts(*working, *waiting, *finished, base);
+            // A failure hidden in a collapsed branch is the louder one.
+            let base = match (*expanded, c.errors > 0, c.finished > 0) {
+                (false, true, _) => ERROR,
+                (false, false, true) => FINISHED,
+                _ => PROJECT_COLOR,
+            };
+            let counts = counts(c, base);
             (format!("{}{} {}  {}{}", "  ".repeat(*depth), faint(arrow, base), leaf, faint(&n.to_string(), base), counts), base)
         }
-        ARow::Agent { idx, prefix, children, working, waiting, pinned, .. } => {
+        ARow::Agent { idx, prefix, children, counts: c, pinned, .. } => {
             let a = &agents[*idx];
             // Names stay in the plain colour; only the dot and the state text carry the state.
             let base = NAME;
@@ -445,7 +494,7 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static st
             let state = state_text(a);
             let state = format!("{}{}", tint(&state), " ".repeat(15usize.saturating_sub(text_width(&state))));
             // The child count is faint too; its coloured counts keep their colours.
-            let kids = if *children > 0 { format!("   \x1b[0m{}⑂ {}\x1b[0m{}{}", FAINT, children, base, counts(*working, *waiting, 0, base)) } else { String::new() };
+            let kids = if *children > 0 { format!("   \x1b[0m{}⑂ {}\x1b[0m{}{}", FAINT, children, base, counts(c, base)) } else { String::new() };
             (format!("{}{}  {}{}", head, " ".repeat(pad), state, kids), base)
         }
     }
@@ -468,8 +517,13 @@ fn preview_lines(row: Option<&ARow>, agents: &[Agent], w: usize, h: usize) -> Ve
                 DIM,
                 fit(&format!(" {} · {}:{} {} · {}{}", a.pane, a.session, a.window_index, a.window_name, state_text(a), kids), w)
             ));
-            let body = capture_preview(&a.pane, h.saturating_sub(1));
-            for _ in 0..h.saturating_sub(1).saturating_sub(body.len()) {
+            // Why the run failed, under the header, so the reason shows without opening the pane.
+            if a.errored() && !a.error.is_empty() {
+                out.push(format!("{}{}\x1b[0m", ERROR, fit(&format!(" \u{2717} {}", a.error), w)));
+            }
+            let rest = h.saturating_sub(out.len());
+            let body = capture_preview(&a.pane, rest);
+            for _ in 0..rest.saturating_sub(body.len()) {
                 out.push(" ".repeat(w));
             }
             for line in body {
