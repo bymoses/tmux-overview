@@ -15,12 +15,17 @@ pub(crate) fn session_display_name(name: &str) -> String {
 }
 
 /// Whether a session's windows are listed. An explicit toggle wins; otherwise
-/// `__bg` (the bash tool's job runner, often many windows) starts collapsed.
+/// `__bg` (the bash tool's job runner, often many windows) and `__agents` (worker
+/// windows; the row's alert badge still counts finished ones) start collapsed.
 pub(crate) fn session_is_expanded(expanded: &HashMap<String, bool>, name: &str) -> bool {
     match expanded.get(name) {
         Some(value) => *value,
-        None => !is_bg_session(name),
+        None => !is_bg_session(name) && !is_agents_session(name),
     }
+}
+
+pub(crate) fn is_agents_session(name: &str) -> bool {
+    name == "__agents" || name.ends_with("/__agents")
 }
 
 /// The bash tool's job-runner session: listed last among its siblings, dimmed.

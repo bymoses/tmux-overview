@@ -585,6 +585,34 @@ e2e("helper-symbol visibility persists across overview invocations", async () =>
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("agents helper session starts collapsed and unfolds with l", async () => {
+  await withFixture("agents_collapsed", async (f) => {
+    const parent = `alpha_agents_${process.pid}`;
+    const agentWindow = `worker_${process.pid}`;
+    await f.createSessionWithOutput(parent, "visible", "AGENTS_PARENT_PREVIEW");
+    await f.createSessionWithOutput(`${parent}/__agents`, agentWindow, "AGENTS_WORKER_PREVIEW");
+
+    await f.launchOverview();
+    f.sendRunnerKey(".");
+    const title = "\u{F06A9} agents";
+    await f.waitUntil("agents helper session visible", () => f.runnerContains(title));
+    expect(f.captureRunner()).toContain(`\u25b8 ${title}`);
+    expect(f.captureRunner()).not.toContain(agentWindow);
+
+    // The selected row is the one painted with the highlight background.
+    const selected = () => f.captureRunnerAnsi().split("\n").find((l) => l.includes("48;2;255;100;150m")) ?? "";
+    for (const key of ["k", "j"]) {
+      for (let i = 0; i < 20 && !selected().includes(title); i++) {
+        f.sendRunnerKey(key);
+        await sleep(80);
+      }
+    }
+    expect(selected()).toContain(title);
+    f.sendRunnerKey("l");
+    await f.waitUntil("agents session unfolded", () => f.runnerContains(agentWindow));
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("bg helper session starts collapsed even when helpers are shown", async () => {
   await withFixture("bg_collapsed", async (f) => {
     const parent = `alpha_bg_${process.pid}`;
