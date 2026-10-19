@@ -1038,7 +1038,7 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     };
     set(orch, { "@agent_kind": "pi", "@agent_state": "idle", "@pi_session": "/x/2026_conv-orch.jsonl" });
     const w1 = pane(`${first}/__agents:worker`);
-    set(w1, { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1", "@agent_bg": "2" });
+    set(w1, { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1", "@agent_bg": "2", "@agent_ctx": "874312 1000000" });
     // Resting on its own bg job: amber, counted apart from idle.
     set(pane(`${second}:solo`), { "@agent_kind": "pi", "@agent_state": "waiting" });
     // A run that stopped on a failed request: red \u2717, counted on its project.
@@ -1085,6 +1085,13 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     // Pane id after the name; the bg jobs it waits for after its state.
     expect(f.captureRunner()).toContain(`w1 ${w1}`);
     expect(f.captureRunner()).toMatch(/working \S* ?\u26992/);
+
+    // `c` adds the context column, red past 80% of the window; unpublished shows `-`; saved.
+    expect(f.captureRunner()).not.toContain("874k/1M");
+    f.sendRunnerKey("c");
+    await f.waitUntil("context column", () => f.runnerContains("874k/1M"));
+    expect(f.captureRunnerAnsi()).toMatch(/1;38;5;203m874k\/1M/);
+    expect(readFileSync(join(f.cache, "tmux-overview", "agents-context"), "utf8").trim()).toBe("1");
 
     // A pin keeps the agent listed under its collapsed project, keyed by its conversation.
     f.sendRunnerKey("p");

@@ -67,6 +67,15 @@ fn save_lines(name: &str, lines: &[String]) {
 
 /// Agents mode pins: conversation ids (pane ids for agents without a log), so a pin
 /// survives a reboot restore that gives the agent a new pane.
+/// Agents mode: show each agent's context window use (`c`).
+pub(crate) fn load_agents_context() -> bool {
+    load_boolean_state("agents-context", false)
+}
+
+pub(crate) fn save_agents_context(on: bool) {
+    save_boolean_state("agents-context", on);
+}
+
 pub(crate) fn load_agent_pins() -> std::collections::HashSet<String> {
     load_lines("agent-pins").into_iter().collect()
 }

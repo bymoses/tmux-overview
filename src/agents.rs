@@ -54,6 +54,10 @@ pub(crate) struct Agent {
     pub bg: usize,
     /// pi-kit's @agent_error: why the last run failed, while the state is "error".
     pub error: String,
+    /// pi-kit's @agent_ctx: context tokens in use (None = unknown, e.g. just compacted) and
+    /// the model's window (0 = not published: pi-kit before 0.3.21).
+    pub ctx_tokens: Option<u64>,
+    pub ctx_window: u64,
 }
 
 /// Tree node of a session: its path without helper segments (`__float`, `__agents`, 
@@ -145,13 +149,13 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}\t#{@agent_error}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}\t#{@agent_error}\t#{@agent_ctx}",
     ])
     .unwrap_or_default();
     raw.lines()
         .filter_map(|line| {
             let p: Vec<&str> = line.split('\t').collect();
-            if p.len() < 15 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
+            if p.len() < 16 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
                 return None;
             }
             Some(Agent {
@@ -167,6 +171,8 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
                 session_file: p[11].to_string(),
                 bg: p[13].parse().unwrap_or(0),
                 error: p[14].to_string(),
+                ctx_tokens: p[15].split(' ').next().and_then(|t| t.parse().ok()),
+                ctx_window: p[15].split(' ').nth(1).and_then(|t| t.parse().ok()).unwrap_or(0),
             })
         })
         .collect()
@@ -435,6 +441,31 @@ fn state_text(a: &Agent) -> String {
     vec![a.state.clone(), age(a.state_at), bg].into_iter().filter(|s| !s.is_empty()).collect::<Vec<String>>().join(" ")
 }
 
+/// `174k`, `1M`: floored like pi's own status line, so both read the same.
+fn tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
+    }
+}
+
+/// `174k/1M` and its colour: faint below half the window, amber to 80%, red above.
+/// `?` = unknown until the next reply after a compaction; `-` = pi-kit too old to publish it.
+fn ctx_text(a: &Agent) -> (String, &'static str) {
+    if a.ctx_window == 0 {
+        return ("-".to_string(), FAINT);
+    }
+    let Some(t) = a.ctx_tokens else {
+        return (format!("?/{}", tokens(a.ctx_window)), FAINT);
+    };
+    let pct = t * 100 / a.ctx_window;
+    let colour = if pct >= 80 { ERROR } else if pct >= 50 { WAITING } else { FAINT };
+    (format!("{}/{}", tokens(t), tokens(a.ctx_window)), colour)
+}
+
 /// ` ●3 ●1`: working in green, finished in purple, zeros left out; `base` is restored
 /// after each.
 /// Working green, waiting amber, finished purple, failed red; zeros left out; `base` restored after each.
@@ -468,7 +499,7 @@ fn label_with_pin(a: &Agent, pinned: bool, base: &str) -> String {
 }
 
 /// One list row (may hold colour codes) plus its base colour. Columns: tree, ●/○, label, state + age, ⑂ children.
-fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static str) {
+fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (String, &'static str) {
     match row {
         ARow::Project { name, depth, agents: n, counts: c, expanded } => {
             let arrow = if *expanded { "▾" } else { "▸" };
@@ -493,6 +524,13 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static st
             let pad = name_w.saturating_sub(text_width(&head));
             let state = state_text(a);
             let state = format!("{}{}", tint(&state), " ".repeat(15usize.saturating_sub(text_width(&state))));
+            // Optional context column (`c`), fixed width so the child counts stay aligned.
+            let state = if show_ctx {
+                let (t, colour) = ctx_text(a);
+                format!("{}\x1b[0m{}{}\x1b[0m{}{}", state, colour, t, base, " ".repeat(9usize.saturating_sub(text_width(&t))))
+            } else {
+                state
+            };
             // The child count is faint too; its coloured counts keep their colours.
             let kids = if *children > 0 { format!("   \x1b[0m{}⑂ {}\x1b[0m{}{}", FAINT, children, base, counts(c, base)) } else { String::new() };
             (format!("{}{}  {}{}", head, " ".repeat(pad), state, kids), base)
@@ -515,7 +553,7 @@ fn preview_lines(row: Option<&ARow>, agents: &[Agent], w: usize, h: usize) -> Ve
             out.push(format!(
                 "{}{}\x1b[0m",
                 DIM,
-                fit(&format!(" {} · {}:{} {} · {}{}", a.pane, a.session, a.window_index, a.window_name, state_text(a), kids), w)
+                fit(&format!(" {} · {}:{} {} · {} · ctx {}{}", a.pane, a.session, a.window_index, a.window_name, state_text(a), ctx_text(a).0, kids), w)
             ));
             // Why the run failed, under the header, so the reason shows without opening the pane.
             if a.errored() && !a.error.is_empty() {
@@ -550,7 +588,7 @@ fn preview_lines(row: Option<&ARow>, agents: &[Agent], w: usize, h: usize) -> Ve
 }
 
 /// `confirm`: a pending "go to <session>?" question, drawn in place of the key hints.
-fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, list_percent: usize, confirm: Option<&str>) -> io::Result<()> {
+fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, show_ctx: bool, list_percent: usize, confirm: Option<&str>) -> io::Result<()> {
     let (h, w) = term_size();
     let body_h = h.max(4);
     let list_h = body_h.saturating_sub(1);
@@ -579,7 +617,7 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
     for y in 0..body_h {
         let content_w = list_w.saturating_sub(1);
         if y + 1 == body_h {
-            let hint = " A overview · enter go · h/l fold · p pin · J/K order · v preview · +/- width · q quit";
+            let hint = " A overview · enter go · h/l fold · p pin · J/K order · c context · v preview · +/- width · q quit";
             match confirm {
                 Some(session) => {
                     let ask = format!(" go to {}?  y/enter yes \u{b7} any other key no", crate::util::session_display_name(session));
@@ -588,7 +626,7 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
                 None => out.push_str(&format!("{}{}\x1b[0m", RULE, fit(hint, list_w))),
             }
         } else if let Some(row) = rows.get(offset + y) {
-            let (text, colour) = row_text(row, agents, name_w);
+            let (text, colour) = row_text(row, agents, name_w, show_ctx);
             if offset + y == selected {
                 out.push_str(&format!("{} {}\x1b[0m", SELECTED, fit(&strip_ansi(&text), content_w)));
             } else {
@@ -641,6 +679,7 @@ pub(crate) fn run<A, B>(
     let mut list_percent = 40usize;
     let mut agents = collect_agents();
     let mut pins = crate::state::load_agent_pins();
+    let mut show_ctx = crate::state::load_agents_context();
     let mut order = crate::state::load_agents_order();
     let rows_for = |agents: &[Agent], expanded: &HashMap<String, bool>, pins: &HashSet<String>, order: &[String]| {
         build_rows(agents, &Layout { expanded, pins, order, current: &current })
@@ -668,7 +707,7 @@ pub(crate) fn run<A, B>(
         }
         selected = selected.min(rows.len().saturating_sub(1));
         if dirty {
-            render(&rows, &agents, selected, *show_preview, list_percent, confirm.as_ref().map(|(_, s): &(String, String)| s.as_str()))?;
+            render(&rows, &agents, selected, *show_preview, show_ctx, list_percent, confirm.as_ref().map(|(_, s): &(String, String)| s.as_str()))?;
             dirty = false;
         }
 
@@ -700,6 +739,10 @@ pub(crate) fn run<A, B>(
             b"v" => {
                 *show_preview = !*show_preview;
                 crate::state::save_show_preview_state(*show_preview);
+            }
+            b"c" => {
+                show_ctx = !show_ctx;
+                crate::state::save_agents_context(show_ctx);
             }
             b"+" | b"=" => list_percent = (list_percent + 5).min(70),
             b"-" | b"_" => list_percent = list_percent.saturating_sub(5).max(20),
