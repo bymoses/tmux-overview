@@ -23,7 +23,7 @@ pub(crate) fn collect_pane_snapshot() -> PaneSnapshot {
         "list-panes",
         "-a",
         "-F",
-        "#{window_id}\t#{pane_index}\t#{pane_current_command}\t#{window_bell_flag}\t#{@agent_state}\t#{@agent_idle_at}\t#{pane_modal_flag}\t#{pane_title}\t#{host_short}",
+        "#{window_id}\t#{pane_index}\t#{pane_current_command}\t#{window_bell_flag}\t#{@agent_state}\t#{@agent_idle_at}\t#{@agent_kind}\t#{@agent_unseen}\t#{pane_modal_flag}\t#{pane_title}\t#{host_short}",
     ])
     .unwrap_or_default();
 
@@ -31,18 +31,21 @@ pub(crate) fn collect_pane_snapshot() -> PaneSnapshot {
     let mut alerts: HashMap<String, AgentAlert> = HashMap::new();
     for line in panes_raw.lines() {
         let mut parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 9 {
+        if parts.len() < 11 {
             continue;
         }
         // A modal pane is a display-popup on tmux-git (the overview itself, among others):
         // not part of the window's own panes.
-        if parts.remove(6) == "1" {
+        if parts.remove(8) == "1" {
             continue;
         }
         let window_id = parts[0];
         let command = parts[2];
-        let title = parts[6].trim();
-        let host = parts[7].trim();
+        // The bell flag is per window: a pi pane counts only if tmux-agent-alert.sh marked it
+        // as one that stopped; bell-only producers (claude, codex) have no marks to check.
+        let marked = parts[6].is_empty() || parts[7] == "1";
+        let title = parts[8].trim();
+        let host = parts[9].trim();
         let label = if !title.is_empty() && title != host {
             title.to_string()
         } else {
@@ -56,7 +59,7 @@ pub(crate) fn collect_pane_snapshot() -> PaneSnapshot {
 
         // The bell flag is the "stopped but not reviewed yet" part; tmux clears
         // it the moment the window is focused.
-        if parts[3] != "1" {
+        if parts[3] != "1" || !marked {
             continue;
         }
         let Some(state) = agent_state_for(parts[4], command) else {

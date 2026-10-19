@@ -21,6 +21,8 @@ const WAITING: &str = "\x1b[38;5;179m";
 const FINISHED: &str = "\x1b[1;38;2;255;100;150m";
 const DIM: &str = "\x1b[38;5;244m";
 const RULE: &str = "\x1b[38;5;238m";
+/// Fold arrows, tree lines and plain counts: below DIM so names and coloured counts stand out.
+const FAINT: &str = "\x1b[38;5;240m";
 const REFRESH_MS: u128 = 500;
 const PIN: &str = "\u{26b2}";
 
@@ -39,7 +41,8 @@ pub(crate) struct Agent {
     pub state_at: u64,
     pub parent: String,
     pub name: String,
-    /// Window bell flag: pi rang it when the agent stopped; tmux clears it once the window is seen.
+    /// Window bell flag plus this pane's @agent_unseen (set by tmux-agent-alert.sh): the bell
+    /// is per window, so in a shared window only the mark says which pane stopped.
     pub bell: bool,
     /// Open conversation log (pi-kit's @pi_session); empty before the first message.
     pub session_file: String,
@@ -125,13 +128,13 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}",
     ])
     .unwrap_or_default();
     raw.lines()
         .filter_map(|line| {
             let p: Vec<&str> = line.split('\t').collect();
-            if p.len() < 12 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
+            if p.len() < 13 || p[4] != "pi" || p[5] == "exited" || p[8] == "1" || p[1].starts_with("_popup_") {
                 return None;
             }
             Some(Agent {
@@ -142,7 +145,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
                 state: if p[5].is_empty() { "starting".to_string() } else { p[5].to_string() },
                 state_at: p[6].parse().unwrap_or(0),
                 parent: p[7].to_string(),
-                bell: p[9] == "1",
+                bell: p[9] == "1" && p[12] == "1",
                 name: p[10].to_string(),
                 session_file: p[11].to_string(),
             })
@@ -402,6 +405,11 @@ fn counts(working: usize, waiting: usize, finished: usize, base: &str) -> String
     s
 }
 
+/// `s` in the faint tree colour, then back to `base`.
+fn faint(s: &str, base: &str) -> String {
+    format!("\x1b[0m{}{}\x1b[0m{}", FAINT, s, base)
+}
+
 fn label_with_pin(a: &Agent, pinned: bool) -> String {
     if pinned { format!("{} {}", a.label(), PIN) } else { a.label() }
 }
@@ -414,14 +422,17 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static st
             let leaf = name.rsplit('/').next().unwrap_or(name);
             // A collapsed branch hiding a finished top-level agent takes its colour.
             let base = if *finished > 0 && !*expanded { FINISHED } else { PROJECT_COLOR };
-            (format!("{}{} {}  {}{}", "  ".repeat(*depth), arrow, leaf, n, counts(*working, *waiting, *finished, base)), base)
+            let counts = counts(*working, *waiting, *finished, base);
+            (format!("{}{} {}  {}{}", "  ".repeat(*depth), faint(arrow, base), leaf, faint(&n.to_string(), base), counts), base)
         }
         ARow::Agent { idx, prefix, children, working, waiting, pinned, .. } => {
             let a = &agents[*idx];
-            let head = format!("{}{} {}", prefix, a.dot(), label_with_pin(a, *pinned));
-            let pad = name_w.saturating_sub(text_width(&head));
             let base = a.colour();
-            let kids = if *children > 0 { format!("   ⑂ {}{}", children, counts(*working, *waiting, 0, base)) } else { String::new() };
+            // Tree lines and fold arrows recede; the dot and name carry the state.
+            let head = format!("{}{} {}", faint(prefix, base), a.dot(), label_with_pin(a, *pinned));
+            let pad = name_w.saturating_sub(text_width(&head));
+            // The child count is faint too; its coloured counts keep their colours.
+            let kids = if *children > 0 { format!("   \x1b[0m{}⑂ {}\x1b[0m{}{}", FAINT, children, base, counts(*working, *waiting, 0, base)) } else { String::new() };
             (format!("{}{}  {:<12}{}", head, " ".repeat(pad), state_text(a), kids), base)
         }
     }

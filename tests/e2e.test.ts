@@ -936,12 +936,23 @@ e2e("unreviewed agent panes badge their window and roll up to the session", asyn
     // window_bell_flag set until the window is focused, which is the "not
     // reviewed yet" half of the signal.
     const idleAt = Math.floor(Date.now() / 1000) - 120;
+    // tmux-agent-alert.sh marks the pane that rang with @agent_unseen: the bell is per window.
+    for (const [name, value] of [
+      ["@agent_kind", "pi"],
+      ["@agent_state", "idle"],
+      ["@agent_idle_at", String(idleAt)],
+      ["@agent_unseen", "1"],
+    ]) {
+      expect(f.tmux(["set-option", "-p", "-t", `${session}:${window}.0`, name, value]).exitCode).toBe(0);
+    }
+    // An idle pi beside it in the same window did not ring: it must not be counted.
+    const quiet = f.tmux(["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", `${session}:${window}.0`, "/bin/sh"]).stdout.trim();
     for (const [name, value] of [
       ["@agent_kind", "pi"],
       ["@agent_state", "idle"],
       ["@agent_idle_at", String(idleAt)],
     ]) {
-      expect(f.tmux(["set-option", "-p", "-t", `${session}:${window}.0`, name, value]).exitCode).toBe(0);
+      expect(f.tmux(["set-option", "-p", "-t", quiet, name, value]).exitCode).toBe(0);
     }
     f.tmux(["send-keys", "-l", "-t", `${session}:${window}.0`, "printf '\\a'"]);
     f.tmux(["send-keys", "-t", `${session}:${window}.0`, "C-m"]);
@@ -953,7 +964,9 @@ e2e("unreviewed agent panes badge their window and roll up to the session", asyn
     await f.launchOverview();
     await f.waitUntil("alert badge rendered", () => f.runnerContains("● 2m"));
     const screen = f.captureRunner();
-    // Window badge carries the age; the session row aggregates its subtree.
+    // Window badge carries the age; the session row aggregates its subtree. One pane, not two:
+    // a count of 2 would read "\u25cf2 2m".
+    expect(screen).not.toContain("2 2m");
     expect(screen).toContain("● 2m");
     expect(screen).toContain("● 1");
   });
