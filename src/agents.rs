@@ -21,6 +21,8 @@ const WAITING: &str = "\x1b[38;5;179m";
 const FINISHED: &str = "\x1b[1;38;2;255;100;150m";
 const DIM: &str = "\x1b[38;5;244m";
 const RULE: &str = "\x1b[38;5;238m";
+/// Agent names: the terminal's plain colour, so state colours stand out on dots and state text.
+const NAME: &str = "\x1b[0m";
 /// Fold arrows, tree lines and plain counts: below DIM so names and coloured counts stand out.
 const FAINT: &str = "\x1b[38;5;240m";
 const REFRESH_MS: u128 = 500;
@@ -427,13 +429,17 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static st
         }
         ARow::Agent { idx, prefix, children, working, waiting, pinned, .. } => {
             let a = &agents[*idx];
-            let base = a.colour();
-            // Tree lines and fold arrows recede; the dot and name carry the state.
-            let head = format!("{}{} {}", faint(prefix, base), a.dot(), label_with_pin(a, *pinned));
+            // Names stay in the plain colour; only the dot and the state text carry the state.
+            let base = NAME;
+            let tint = |s: &str| format!("\x1b[0m{}{}\x1b[0m{}", a.colour(), s, base);
+            // Tree lines and fold arrows recede.
+            let head = format!("{}{} {}", faint(prefix, base), tint(a.dot()), label_with_pin(a, *pinned));
             let pad = name_w.saturating_sub(text_width(&head));
+            let state = state_text(a);
+            let state = format!("{}{}", tint(&state), " ".repeat(12usize.saturating_sub(text_width(&state))));
             // The child count is faint too; its coloured counts keep their colours.
             let kids = if *children > 0 { format!("   \x1b[0m{}⑂ {}\x1b[0m{}{}", FAINT, children, base, counts(*working, *waiting, 0, base)) } else { String::new() };
-            (format!("{}{}  {:<12}{}", head, " ".repeat(pad), state_text(a), kids), base)
+            (format!("{}{}  {}{}", head, " ".repeat(pad), state, kids), base)
         }
     }
 }
@@ -468,8 +474,9 @@ fn preview_lines(row: Option<&ARow>, agents: &[Agent], w: usize, h: usize) -> Ve
             let mut list: Vec<&Agent> = agents.iter().filter(|a| in_subtree(&a.node(), name)).collect();
             list.sort_by_key(|a| (!a.working(), window_order(a)));
             for a in list {
-                let line = fit(&format!(" {} {}  {}  {}:{}", a.dot(), a.label(), state_text(a), a.session, a.window_index), w);
-                out.push(format!("{}{}\x1b[0m", a.colour(), line));
+                let (c, dot, state) = (a.colour(), a.dot(), state_text(a));
+                let line = format!(" {c}{dot}\x1b[0m {}  {c}{state}\x1b[0m  {DIM}{}:{}\x1b[0m", a.label(), a.session, a.window_index);
+                out.push(ansi_fit(&line, w));
             }
         }
         None => out.push(fit(" no pi agents running", w)),
