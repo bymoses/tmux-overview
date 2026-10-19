@@ -15,6 +15,8 @@ use crate::util::{plain_truncate, strip_ansi, text_width, visible_truncate_ansi}
 const SELECTED: &str = "\x1b[48;2;255;100;150m\x1b[38;2;0;0;0m";
 const PROJECT_COLOR: &str = "\x1b[1;38;5;252m";
 const WORKING: &str = "\x1b[38;5;114m";
+/// Resting on its own bg job or scheduled check: it will wake by itself.
+const WAITING: &str = "\x1b[38;5;179m";
 /// Same colour as the overview's "stopped, not reviewed yet" badge.
 const FINISHED: &str = "\x1b[1;38;2;255;100;150m";
 const DIM: &str = "\x1b[38;5;244m";
@@ -84,13 +86,20 @@ impl Agent {
         self.state == "working"
     }
 
+    /// pi-kit's resting state while a detached bash job or scheduled check is pending.
+    fn waiting(&self) -> bool {
+        self.state == "waiting"
+    }
+
     /// Stopped and not looked at yet, as in the overview's alert badge.
     fn finished(&self) -> bool {
-        self.bell && !self.working()
+        self.bell && !self.working() && !self.waiting()
     }
 
     fn dot(&self) -> &'static str {
-        if self.working() || self.finished() {
+        if self.waiting() {
+            "\u{25d0}"
+        } else if self.working() || self.finished() {
             "●"
         } else {
             "○"
@@ -102,6 +111,8 @@ impl Agent {
             FINISHED
         } else if self.working() {
             WORKING
+        } else if self.waiting() {
+            WAITING
         } else {
             DIM
         }
@@ -142,10 +153,10 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
 /// `Project` is a session-tree node (`dgt`, `dgt/eclion`); counts cover its whole subtree.
 #[derive(Clone)]
 pub(crate) enum ARow {
-    Project { name: String, depth: usize, agents: usize, working: usize, finished: usize, expanded: bool },
+    Project { name: String, depth: usize, agents: usize, working: usize, waiting: usize, finished: usize, expanded: bool },
     /// `working` counts hidden descendants while folded (`expanded` false). A finished worker
     /// is not flagged on its parent: only top-level agents waiting on the user matter.
-    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, pinned: bool },
+    Agent { idx: usize, prefix: String, children: usize, expanded: bool, working: usize, waiting: usize, pinned: bool },
 }
 
 /// What a row layout depends on besides the agents.
@@ -255,6 +266,7 @@ pub(crate) fn build_rows(agents: &[Agent], layout: &Layout) -> Vec<ARow> {
             depth,
             agents: members.len(),
             working: members.iter().filter(|&&i| agents[i].working()).count(),
+            waiting: members.iter().filter(|&&i| agents[i].waiting()).count(),
             // Only top-level agents: a worker finishing reports to its parent, not the user.
             finished: members.iter().filter(|&&i| agents[i].finished() && !tree.is_worker(i)).count(),
             expanded: open,
@@ -323,13 +335,14 @@ fn push_tree(rows: &mut Vec<ARow>, tree: &Tree, idx: usize, lead: &str, last: Op
         (None, Some(f)) => format!("{}{} ", &lead[..lead.len().saturating_sub(2)], f),
         (Some(l), f) => format!("{}{}{} ", lead, if l { "└" } else { "├" }, f.unwrap_or("─")),
     };
-    let mut working = 0;
+    let (mut working, mut waiting) = (0, 0);
     let mut hidden = Vec::new();
     if !open {
         tree.descendants(idx, &mut seen.clone(), &mut hidden);
         working = hidden.iter().filter(|&&i| agents[i].working()).count();
+        waiting = hidden.iter().filter(|&&i| agents[i].waiting()).count();
     }
-    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, pinned: tree.pinned(idx) });
+    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, working, waiting, pinned: tree.pinned(idx) });
     // Children hang under the parent's name, not its dot: a connector in the dot's column
     // reads as a sibling.
     let below = format!(
@@ -375,10 +388,13 @@ fn state_text(a: &Agent) -> String {
 
 /// ` ●3 ●1`: working in green, finished in purple, zeros left out; `base` is restored
 /// after each.
-fn counts(working: usize, finished: usize, base: &str) -> String {
+fn counts(working: usize, waiting: usize, finished: usize, base: &str) -> String {
     let mut s = String::new();
     if working > 0 {
         s.push_str(&format!(" \x1b[0m{}●{}\x1b[0m{}", WORKING, working, base));
+    }
+    if waiting > 0 {
+        s.push_str(&format!(" \x1b[0m{}\u{25d0}{}\x1b[0m{}", WAITING, waiting, base));
     }
     if finished > 0 {
         s.push_str(&format!(" \x1b[0m{}●{}\x1b[0m{}", FINISHED, finished, base));
@@ -393,19 +409,19 @@ fn label_with_pin(a: &Agent, pinned: bool) -> String {
 /// One list row (may hold colour codes) plus its base colour. Columns: tree, ●/○, label, state + age, ⑂ children.
 fn row_text(row: &ARow, agents: &[Agent], name_w: usize) -> (String, &'static str) {
     match row {
-        ARow::Project { name, depth, agents: n, working, finished, expanded } => {
+        ARow::Project { name, depth, agents: n, working, waiting, finished, expanded } => {
             let arrow = if *expanded { "▾" } else { "▸" };
             let leaf = name.rsplit('/').next().unwrap_or(name);
             // A collapsed branch hiding a finished top-level agent takes its colour.
             let base = if *finished > 0 && !*expanded { FINISHED } else { PROJECT_COLOR };
-            (format!("{}{} {}  {}{}", "  ".repeat(*depth), arrow, leaf, n, counts(*working, *finished, base)), base)
+            (format!("{}{} {}  {}{}", "  ".repeat(*depth), arrow, leaf, n, counts(*working, *waiting, *finished, base)), base)
         }
-        ARow::Agent { idx, prefix, children, working, pinned, .. } => {
+        ARow::Agent { idx, prefix, children, working, waiting, pinned, .. } => {
             let a = &agents[*idx];
             let head = format!("{}{} {}", prefix, a.dot(), label_with_pin(a, *pinned));
             let pad = name_w.saturating_sub(text_width(&head));
             let base = a.colour();
-            let kids = if *children > 0 { format!("   ⑂ {}{}", children, counts(*working, 0, base)) } else { String::new() };
+            let kids = if *children > 0 { format!("   ⑂ {}{}", children, counts(*working, *waiting, 0, base)) } else { String::new() };
             (format!("{}{}  {:<12}{}", head, " ".repeat(pad), state_text(a), kids), base)
         }
     }
