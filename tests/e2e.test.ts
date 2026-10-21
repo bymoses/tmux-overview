@@ -1086,11 +1086,12 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     expect(f.captureRunner()).toContain(`w1 ${w1}`);
     expect(f.captureRunner()).toMatch(/working \S* ?\u26992/);
 
-    // `c` adds the context column, red past 80% of the window; unpublished shows `-`; saved.
+    // `c` adds the context column, red from 450k tokens; saved.
     expect(f.captureRunner()).not.toContain("874k/1M");
     f.sendRunnerKey("c");
     await f.waitUntil("context column", () => f.runnerContains("874k/1M"));
-    expect(f.captureRunnerAnsi()).toMatch(/1;38;5;203m874k\/1M/);
+    // tmux writes bold + colour as one SGR or two (`1;38;5;203m` or `1m\e[38;5;203m`), by what came before.
+    expect(f.captureRunnerAnsi()).toMatch(/1(;|m\x1b\[)38;5;203m874k\/1M/);
     expect(readFileSync(join(f.cache, "tmux-overview", "agents-context"), "utf8").trim()).toBe("1");
 
     // A pin keeps the agent listed under its collapsed project, keyed by its conversation.

@@ -452,7 +452,7 @@ fn tokens(n: u64) -> String {
     }
 }
 
-/// `174k/1M` and its colour: faint below half the window, amber to 80%, red above.
+/// `174k/1M` and its colour by size, like pi-kit's status line: amber from 350k, red from 450k.
 /// `?` = unknown until the next reply after a compaction; `-` = pi-kit too old to publish it.
 fn ctx_text(a: &Agent) -> (String, &'static str) {
     if a.ctx_window == 0 {
@@ -461,8 +461,7 @@ fn ctx_text(a: &Agent) -> (String, &'static str) {
     let Some(t) = a.ctx_tokens else {
         return (format!("?/{}", tokens(a.ctx_window)), FAINT);
     };
-    let pct = t * 100 / a.ctx_window;
-    let colour = if pct >= 80 { ERROR } else if pct >= 50 { WAITING } else { FAINT };
+    let colour = if t >= 450_000 { ERROR } else if t >= 350_000 { WAITING } else { FAINT };
     (format!("{}/{}", tokens(t), tokens(a.ctx_window)), colour)
 }
 
