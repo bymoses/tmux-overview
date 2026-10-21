@@ -1066,11 +1066,12 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
       expect(selected()).toContain(text);
     };
 
-    // Neither project holds the runner session, so both start collapsed; counts are compact.
-    // 3 agents, 1 working; the finished worker adds no purple count.
-    await f.waitUntil("collapsed projects", () => f.runnerContains(`\u25b8 ${first}  3 \u25cf1 `));
-    expect(f.captureRunner()).not.toContain(`\u25b8 ${first}  3 \u25cf1 \u25cf`);
-    expect(f.captureRunner()).toContain(`\u25b8 ${second}  2 \u25d01 \u27171`);
+    // Neither project holds the runner session, so both start collapsed; a project row shows only
+    // its agent count, no per-state counts; a failure inside turns the collapsed row red.
+    await f.waitUntil("collapsed projects", () => f.runnerContains(`\u25b8 ${first}  3`));
+    expect(f.captureRunner()).not.toMatch(new RegExp(`\u25b8 ${first}  3 \\S`));
+    expect(f.captureRunner()).not.toMatch(new RegExp(`\u25b8 ${second}  2 \\S`));
+    expect(f.captureRunnerAnsi().split("\n").find((l) => l.includes("\u25b8") && l.includes(` ${second}`))).toContain("38;5;203m");
 
     // Unfolding the project shows the orchestrator with its worker folded under it.
     await select(first);

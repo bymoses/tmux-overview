@@ -510,8 +510,9 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (Str
                 (false, false, true) => FINISHED,
                 _ => PROJECT_COLOR,
             };
-            let counts = counts(c, base);
-            (format!("{}{} {}  {}{}", "  ".repeat(*depth), faint(arrow, base), leaf, faint(&n.to_string(), base), counts), base)
+            // Just the agent count: per-state counts on every project made a noisy column; a
+            // collapsed project's colour still flags a failure or a finished agent inside.
+            (format!("{}{} {}  {}", "  ".repeat(*depth), faint(arrow, base), leaf, faint(&n.to_string(), base)), base)
         }
         ARow::Agent { idx, prefix, children, counts: c, pinned, .. } => {
             let a = &agents[*idx];
