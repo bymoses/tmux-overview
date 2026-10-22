@@ -13,7 +13,8 @@ use crate::tmux_api::{tmux, tmux_status_ignore};
 use crate::util::{plain_truncate, strip_ansi, text_width, visible_truncate_ansi};
 
 const SELECTED: &str = "\x1b[48;2;255;100;150m\x1b[38;2;0;0;0m";
-const PROJECT_COLOR: &str = "\x1b[1;38;5;252m";
+/// Session (project) rows: bold full white, the brightest text in the list.
+const PROJECT_COLOR: &str = "\x1b[1;38;5;255m";
 const WORKING: &str = "\x1b[38;5;114m";
 /// Resting on its own bg job or scheduled check: it will wake by itself.
 const WAITING: &str = "\x1b[38;5;179m";
@@ -23,8 +24,8 @@ const ERROR: &str = "\x1b[1;38;5;203m";
 const FINISHED: &str = "\x1b[1;38;2;255;100;150m";
 const DIM: &str = "\x1b[38;5;244m";
 const RULE: &str = "\x1b[38;5;238m";
-/// Agent names: the terminal's plain colour, so state colours stand out on dots and state text.
-const NAME: &str = "\x1b[0m";
+/// Agent names: soft grey under the bold white session rows; state colours stay on dots and state text.
+const NAME: &str = "\x1b[38;5;248m";
 /// Fold arrows, tree lines and plain counts: below DIM so names and coloured counts stand out.
 const FAINT: &str = "\x1b[38;5;240m";
 const REFRESH_MS: u128 = 500;
