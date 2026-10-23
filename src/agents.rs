@@ -15,9 +15,8 @@ use crate::util::{plain_truncate, strip_ansi, text_width, visible_truncate_ansi}
 const SELECTED: &str = "\x1b[48;2;255;100;150m\x1b[38;2;0;0;0m";
 /// Session (project) rows: bold full white, the brightest text in the list.
 const PROJECT_COLOR: &str = "\x1b[1;38;5;255m";
-/// Nested sessions (`whyti/arka` under `whyti`): bold but dimmer than agent names, so a
-/// sub-project heading never reads as an agent.
-const NESTED_PROJECT_COLOR: &str = "\x1b[1;38;5;243m";
+/// Workers (spawned by another agent): dimmer than top-level agents, which are the ones to talk to.
+const WORKER_NAME: &str = "\x1b[38;5;243m";
 const WORKING: &str = "\x1b[38;5;114m";
 /// Resting on its own bg job or scheduled check: it will wake by itself.
 const WAITING: &str = "\x1b[38;5;179m";
@@ -193,7 +192,7 @@ pub(crate) enum ARow {
     Project { name: String, depth: usize, agents: usize, counts: Counts, expanded: bool },
     /// `working` counts hidden descendants while folded (`expanded` false). A finished worker
     /// is not flagged on its parent: only top-level agents waiting on the user matter.
-    Agent { idx: usize, prefix: String, children: usize, expanded: bool, counts: Counts, pinned: bool },
+    Agent { idx: usize, prefix: String, children: usize, expanded: bool, counts: Counts, pinned: bool, worker: bool },
 }
 
 /// Agents per state, drawn as coloured counts; zeros left out.
@@ -413,7 +412,7 @@ fn push_tree(rows: &mut Vec<ARow>, tree: &Tree, idx: usize, lead: &str, last: Op
         // Hidden workers: busy and failed ones show; a finished worker reports to this parent.
         counts = Counts::of(hidden.iter().map(|&i| &agents[i]), |_| false);
     }
-    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, counts, pinned: tree.pinned(idx) });
+    rows.push(ARow::Agent { idx, prefix, children: kids.len(), expanded: open, counts, pinned: tree.pinned(idx), worker: tree.is_worker(idx) });
     // Children hang under the parent's name, not its dot: a connector in the dot's column
     // reads as a sibling.
     let below = format!(
@@ -534,7 +533,6 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (Str
             let base = match (*expanded, c.errors > 0, c.finished > 0) {
                 (false, true, _) => ERROR,
                 (false, false, true) => FINISHED,
-                _ if *depth > 0 => NESTED_PROJECT_COLOR,
                 _ => PROJECT_COLOR,
             };
             // Just the agent count: per-state counts on every project made a noisy column; a
@@ -543,10 +541,10 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (Str
             let full = if *expanded { String::new() } else { full_mark(c.full, base) };
             (format!("{}{} {}  {}{}", "  ".repeat(*depth), faint(arrow, base), leaf, faint(&n.to_string(), base), full), base)
         }
-        ARow::Agent { idx, prefix, children, counts: c, pinned, .. } => {
+        ARow::Agent { idx, prefix, children, counts: c, pinned, worker, .. } => {
             let a = &agents[*idx];
-            // Names stay in the plain colour; only the dot and the state text carry the state.
-            let base = NAME;
+            // Names stay in the plain colour (workers dimmer); only the dot and the state text carry the state.
+            let base = if *worker { WORKER_NAME } else { NAME };
             let tint = |s: &str| format!("\x1b[0m{}{}\x1b[0m{}", a.colour(), s, base);
             // Tree lines and fold arrows recede.
             let head = format!("{}{} {}", faint(prefix, base), tint(a.dot()), label_with_pin(a, *pinned, base));
