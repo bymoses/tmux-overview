@@ -15,6 +15,9 @@ use crate::util::{plain_truncate, strip_ansi, text_width, visible_truncate_ansi}
 const SELECTED: &str = "\x1b[48;2;255;100;150m\x1b[38;2;0;0;0m";
 /// Session (project) rows: bold full white, the brightest text in the list.
 const PROJECT_COLOR: &str = "\x1b[1;38;5;255m";
+/// Nested sessions (`whyti/arka` under `whyti`): bold but dimmer than agent names, so a
+/// sub-project heading never reads as an agent.
+const NESTED_PROJECT_COLOR: &str = "\x1b[1;38;5;243m";
 const WORKING: &str = "\x1b[38;5;114m";
 /// Resting on its own bg job or scheduled check: it will wake by itself.
 const WAITING: &str = "\x1b[38;5;179m";
@@ -509,6 +512,7 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (Str
             let base = match (*expanded, c.errors > 0, c.finished > 0) {
                 (false, true, _) => ERROR,
                 (false, false, true) => FINISHED,
+                _ if *depth > 0 => NESTED_PROJECT_COLOR,
                 _ => PROJECT_COLOR,
             };
             // Just the agent count: per-state counts on every project made a noisy column; a
