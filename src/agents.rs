@@ -16,7 +16,7 @@ const SELECTED: &str = "\x1b[48;2;255;100;150m\x1b[38;2;0;0;0m";
 /// Session (project) rows: bold full white, the brightest text in the list.
 const PROJECT_COLOR: &str = "\x1b[1;38;5;255m";
 /// Workers (spawned by another agent): dimmer than top-level agents, which are the ones to talk to.
-const WORKER_NAME: &str = "\x1b[38;5;243m";
+const WORKER_NAME: &str = "\x1b[38;5;240m";
 const WORKING: &str = "\x1b[38;5;114m";
 /// Resting on its own bg job or scheduled check: it will wake by itself.
 const WAITING: &str = "\x1b[38;5;179m";
