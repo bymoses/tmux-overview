@@ -115,6 +115,11 @@ impl Agent {
         self.state == "error"
     }
 
+    /// Context at or past CTX_ALERT: time to compact or hand off.
+    fn ctx_full(&self) -> bool {
+        self.ctx_tokens.is_some_and(|t| t >= CTX_ALERT)
+    }
+
     /// Stopped and not looked at yet, as in the overview's alert badge.
     fn finished(&self) -> bool {
         self.bell && !self.working() && !self.waiting() && !self.errored()
@@ -198,7 +203,15 @@ pub(crate) struct Counts {
     waiting: usize,
     finished: usize,
     errors: usize,
+    /// Context at or past CTX_ALERT: the session wants a compaction.
+    full: usize,
 }
+
+/// Context size that wants a compaction (pi-kit's status line turns red here too).
+const CTX_ALERT: u64 = 450_000;
+const CTX_WARN: u64 = 350_000;
+/// Marks an agent, or hidden agents, past CTX_ALERT.
+const FULL_MARK: &str = "\u{25b2}";
 
 impl Counts {
     /// `finished` only for agents `notify` accepts: a worker that finished reports to its parent.
@@ -209,6 +222,7 @@ impl Counts {
             c.waiting += a.waiting() as usize;
             c.finished += (a.finished() && notify(a)) as usize;
             c.errors += a.errored() as usize;
+            c.full += a.ctx_full() as usize;
         }
         c
     }
@@ -465,13 +479,20 @@ fn ctx_text(a: &Agent) -> (String, &'static str) {
     let Some(t) = a.ctx_tokens else {
         return (format!("?/{}", tokens(a.ctx_window)), FAINT);
     };
-    let colour = if t >= 450_000 { ERROR } else if t >= 350_000 { WAITING } else { FAINT };
+    let colour = if t >= CTX_ALERT { ERROR } else if t >= CTX_WARN { WAITING } else { FAINT };
     (format!("{}/{}", tokens(t), tokens(a.ctx_window)), colour)
 }
 
-/// ` ●3 ●1`: working in green, finished in purple, zeros left out; `base` is restored
-/// after each.
-/// Working green, waiting amber, finished purple, failed red; zeros left out; `base` restored after each.
+/// ` ▲1`: hidden agents whose context wants a compaction, in red; nothing when none.
+fn full_mark(n: usize, base: &str) -> String {
+    if n == 0 {
+        return String::new();
+    }
+    format!(" \x1b[0m{}{}{}\x1b[0m{}", ERROR, FULL_MARK, n, base)
+}
+
+/// Working green, waiting amber, failed red, finished purple, context full red ▲; zeros left
+/// out; `base` restored after each.
 fn counts(c: &Counts, base: &str) -> String {
     let (working, waiting, finished) = (c.working, c.waiting, c.finished);
     let mut s = String::new();
@@ -487,6 +508,7 @@ fn counts(c: &Counts, base: &str) -> String {
     if finished > 0 {
         s.push_str(&format!(" \x1b[0m{}●{}\x1b[0m{}", FINISHED, finished, base));
     }
+    s.push_str(&full_mark(c.full, base));
     s
 }
 
@@ -517,7 +539,9 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (Str
             };
             // Just the agent count: per-state counts on every project made a noisy column; a
             // collapsed project's colour still flags a failure or a finished agent inside.
-            (format!("{}{} {}  {}", "  ".repeat(*depth), faint(arrow, base), leaf, faint(&n.to_string(), base)), base)
+            // ...except "context full": a collapsed project marks agents that want a compaction.
+            let full = if *expanded { String::new() } else { full_mark(c.full, base) };
+            (format!("{}{} {}  {}{}", "  ".repeat(*depth), faint(arrow, base), leaf, faint(&n.to_string(), base), full), base)
         }
         ARow::Agent { idx, prefix, children, counts: c, pinned, .. } => {
             let a = &agents[*idx];
@@ -527,8 +551,11 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (Str
             // Tree lines and fold arrows recede.
             let head = format!("{}{} {}", faint(prefix, base), tint(a.dot()), label_with_pin(a, *pinned, base));
             let pad = name_w.saturating_sub(text_width(&head));
+            // With the context column off, a full context still shows as " \u{25b2}" after the state.
             let state = state_text(a);
-            let state = format!("{}{}", tint(&state), " ".repeat(15usize.saturating_sub(text_width(&state))));
+            let mark = if !show_ctx && a.ctx_full() { format!(" \x1b[0m{}{}\x1b[0m{}", ERROR, FULL_MARK, base) } else { String::new() };
+            let pad_w = 15usize.saturating_sub(text_width(&state) + if mark.is_empty() { 0 } else { 2 });
+            let state = format!("{}{}{}", tint(&state), mark, " ".repeat(pad_w));
             // Optional context column (`c`), fixed width so the child counts stay aligned.
             let state = if show_ctx {
                 let (t, colour) = ctx_text(a);
