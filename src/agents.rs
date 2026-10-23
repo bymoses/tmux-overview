@@ -248,6 +248,15 @@ impl ARow {
             ARow::Agent { idx, .. } => agents[*idx].pane.clone(),
         }
     }
+
+    /// Like `key`, but an agent is named by its conversation (pin key), which outlives pane
+    /// ids across a reboot restore; saved so a reopened agents mode lands on the same row.
+    fn saved_key(&self, agents: &[Agent]) -> String {
+        match self {
+            ARow::Project { name, .. } => format!("p:{}", name),
+            ARow::Agent { idx, .. } => format!("a:{}", agents[*idx].pin_key()),
+        }
+    }
 }
 
 fn expanded_key(project: &str) -> String {
@@ -715,8 +724,14 @@ pub(crate) fn run<A, B>(
         build_rows(agents, &Layout { expanded, pins, order, current: &current })
     };
     let mut rows = rows_for(&agents, expanded, &pins, &order);
-    // Start on the first agent of the current project, else the first row.
-    let mut selected = rows.iter().position(|r| matches!(r, ARow::Agent { .. })).unwrap_or(0);
+    // Start on the row selected when agents mode last closed, else the first agent, else row 0.
+    let saved = crate::state::load_agents_cursor();
+    let mut selected = saved
+        .as_deref()
+        .and_then(|k| rows.iter().position(|r| r.saved_key(&agents) == k))
+        .or_else(|| rows.iter().position(|r| matches!(r, ARow::Agent { .. })))
+        .unwrap_or(0);
+    let mut saved = saved.unwrap_or_default();
     let mut last_refresh = Instant::now();
     let mut dirty = true;
     // (pane, session) waiting for a yes before switching into a helper session.
@@ -736,6 +751,13 @@ pub(crate) fn run<A, B>(
             dirty = true; // the preview is live
         }
         selected = selected.min(rows.len().saturating_sub(1));
+        // Remember the selection for the next opening (written only when it changes).
+        if let Some(k) = rows.get(selected).map(|r| r.saved_key(&agents)) {
+            if k != saved {
+                crate::state::save_agents_cursor(&k);
+                saved = k;
+            }
+        }
         if dirty {
             render(&rows, &agents, selected, *show_preview, show_ctx, list_percent, confirm.as_ref().map(|(_, s): &(String, String)| s.as_str()))?;
             dirty = false;

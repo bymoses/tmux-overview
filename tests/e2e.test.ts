@@ -234,7 +234,8 @@ class Fixture {
     this.fail(`could not select preview text ${text}`);
   }
 
-  async launchOverview(): Promise<void> {
+  /** Start the overview; `ready` is the text that marks its first render. */
+  async launchOverview(ready = "tmux overview"): Promise<void> {
     const cmd = [
       "env",
       `HOME=${shQuote(this.home)}`,
@@ -247,7 +248,7 @@ class Fixture {
       shQuote(BIN),
     ].join(" ");
     this.sendRunnerKey(cmd, "C-m");
-    await this.waitUntil("overview initial render", () => this.runnerContains("tmux overview"));
+    await this.waitUntil("overview initial render", () => this.runnerContains(ready));
   }
 
   async quitOverview(): Promise<void> {
@@ -1118,6 +1119,16 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
       return s.indexOf(`\u25b8 ${second}`) < s.indexOf(`\u25b8 ${first}`);
     });
     expect(readFileSync(join(f.cache, "tmux-overview", "agents-order"), "utf8")).toBe(`${second}\n${first}\n`);
+
+    // The selected row survives closing and reopening: an agent by its conversation.
+    await select(first);
+    f.sendRunnerKey("l");
+    await select("orch");
+    expect(readFileSync(join(f.cache, "tmux-overview", "agents-cursor"), "utf8").trim()).toBe("a:2026_conv-orch");
+    f.sendRunnerKey("q");
+    await f.waitUntil("agents mode closed", () => f.runnerLacks("A overview"));
+    await f.launchOverview("A overview");
+    await f.waitUntil("selection restored", () => selected().includes("orch"));
   });
 }, TEST_TIMEOUT_MS);
 

@@ -247,6 +247,21 @@ pub(crate) fn load_cursor_key() -> Option<String> {
     if key.is_empty() { None } else { Some(key.to_string()) }
 }
 
+/// Agents mode's selected row (`a:<conversation>` or `p:<project>`), kept across openings.
+pub(crate) fn load_agents_cursor() -> Option<String> {
+    let contents = fs::read_to_string(cache_dir()?.join("agents-cursor")).ok()?;
+    let key = contents.trim();
+    if key.is_empty() { None } else { Some(key.to_string()) }
+}
+
+pub(crate) fn save_agents_cursor(key: &str) {
+    let Some(dir) = cache_dir() else {
+        return;
+    };
+    let _ = fs::create_dir_all(&dir);
+    let _ = fs::write(dir.join("agents-cursor"), format!("{}\n", key));
+}
+
 pub(crate) fn save_cursor_key(key: &str) {
     let Some(path) = cursor_path() else {
         return;
