@@ -1068,7 +1068,7 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     };
 
     // Neither project holds the runner session, so both start collapsed; a project row shows only
-    // its agent count, plus \u25b2N for agents past 450k context (w1 holds 874k); a failure inside
+    // its agent count, plus \u25b2N for agents past 350k context (w1 holds 874k); a failure inside
     // turns the collapsed row red.
     await f.waitUntil("collapsed projects", () => f.runnerContains(`\u25b8 ${first}  3`));
     expect(f.captureRunner()).toContain(`\u25b8 ${first}  3 \u25b21`);
@@ -1080,7 +1080,7 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     f.sendRunnerKey("l");
     await f.waitUntil("folded orchestrator", () => f.runnerContains("\u2442 2 \u25cf1 "));
     expect(f.captureRunner()).not.toContain("\u2442 2 \u25cf1 \u25cf");
-    // The folded worker past 450k marks its parent; the open project drops its own mark.
+    // The folded worker past 350k marks its parent; the open project drops its own mark.
     expect(f.captureRunner()).toContain("\u2442 2 \u25cf1 \u25b21");
     expect(f.captureRunner()).not.toContain(`\u25be ${first}  3 \u25b2`);
     // (The project preview on the right still lists w1; the tree row does not.)
@@ -1094,7 +1094,7 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     // Shown, w1 marks itself while the context column is off.
     expect(f.captureRunner()).toMatch(/working \S* ?\u26992 \u25b2/);
 
-    // `c` adds the context column, red from 450k tokens; saved.
+    // `c` adds the context column, red from 350k tokens; saved.
     expect(f.captureRunner()).not.toContain("874k/1M");
     f.sendRunnerKey("c");
     await f.waitUntil("context column", () => f.runnerContains("874k/1M"));

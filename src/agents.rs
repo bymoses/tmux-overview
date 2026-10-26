@@ -206,9 +206,10 @@ pub(crate) struct Counts {
     full: usize,
 }
 
-/// Context size that wants a compaction (pi-kit's status line turns red here too).
-const CTX_ALERT: u64 = 450_000;
-const CTX_WARN: u64 = 350_000;
+/// Context sizes around pi's auto-compaction at 250k: amber once past it (an opted-out or
+/// mid-run session), red and \u{25b2} at 350k, where it is clearly overdue.
+const CTX_ALERT: u64 = 350_000;
+const CTX_WARN: u64 = 250_000;
 /// Marks an agent, or hidden agents, past CTX_ALERT.
 const FULL_MARK: &str = "\u{25b2}";
 
@@ -478,7 +479,7 @@ fn tokens(n: u64) -> String {
     }
 }
 
-/// `174k/1M` and its colour by size, like pi-kit's status line: amber from 350k, red from 450k.
+/// `174k/1M` and its colour by size: amber from CTX_WARN, red from CTX_ALERT.
 /// `?` = unknown until the next reply after a compaction; `-` = pi-kit too old to publish it.
 fn ctx_text(a: &Agent) -> (String, &'static str) {
     if a.ctx_window == 0 {
