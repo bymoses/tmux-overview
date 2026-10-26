@@ -1039,7 +1039,7 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     };
     set(orch, { "@agent_kind": "pi", "@agent_state": "idle", "@pi_session": "/x/2026_conv-orch.jsonl" });
     const w1 = pane(`${first}/__agents:worker`);
-    set(w1, { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1", "@agent_bg": "2", "@agent_ctx": "874312 1000000" });
+    set(w1, { "@agent_kind": "pi", "@agent_state": "working", "@agent_parent": orch, "@agent_name": "w1", "@agent_bg": "2", "@agent_ctx": "874312 1000000", "@agent_compaction": "off" });
     // Resting on its own bg job: amber, counted apart from idle.
     set(pane(`${second}:solo`), { "@agent_kind": "pi", "@agent_state": "waiting" });
     // A run that stopped on a failed request: red \u2717, counted on its project.
@@ -1089,7 +1089,8 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     f.sendRunnerKey("l");
     await f.waitUntil("worker under orchestrator", () => f.runnerContains("\u2500 \u25cf w1"));
     // Pane id after the name; the bg jobs it waits for after its state.
-    expect(f.captureRunner()).toContain(`w1 ${w1}`);
+    // \u2298 after the name: its auto-compaction is off (pi-kit's /compaction off).
+    expect(f.captureRunner()).toContain(`w1 \u2298 ${w1}`);
     expect(f.captureRunner()).toMatch(/working \S* ?\u26992/);
     // Shown, w1 marks itself while the context column is off.
     expect(f.captureRunner()).toMatch(/working \S* ?\u26992 \u25b2/);

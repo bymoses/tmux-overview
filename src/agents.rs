@@ -32,6 +32,8 @@ const NAME: &str = "\x1b[38;5;248m";
 const FAINT: &str = "\x1b[38;5;240m";
 const REFRESH_MS: u128 = 500;
 const PIN: &str = "\u{26b2}";
+/// After the name of a session with `/compaction off` (pi-kit's status line shows `\u{2298}cmp`).
+const NO_COMPACT: &str = "\u{2298}";
 
 pub(crate) enum Exit {
     Quit,
@@ -61,6 +63,8 @@ pub(crate) struct Agent {
     /// the model's window (0 = not published: pi-kit before 0.3.21).
     pub ctx_tokens: Option<u64>,
     pub ctx_window: u64,
+    /// pi-kit's @agent_compaction = "off": `/compaction off`, so it grows past the auto-compaction threshold.
+    pub compaction_off: bool,
 }
 
 /// Tree node of a session: its path without helper segments (`__float`, `__agents`, 
@@ -157,7 +161,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}\t#{@agent_error}\t#{@agent_ctx}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}\t#{@agent_error}\t#{@agent_ctx}\t#{@agent_compaction}",
     ])
     .unwrap_or_default();
     raw.lines()
@@ -181,6 +185,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
                 error: p[14].to_string(),
                 ctx_tokens: p[15].split(' ').next().and_then(|t| t.parse().ok()),
                 ctx_window: p[15].split(' ').nth(1).and_then(|t| t.parse().ok()).unwrap_or(0),
+                compaction_off: p.get(16) == Some(&"off"),
             })
         })
         .collect()
@@ -526,9 +531,15 @@ fn faint(s: &str, base: &str) -> String {
     format!("\x1b[0m{}{}\x1b[0m{}", FAINT, s, base)
 }
 
-/// Name, pin mark, and the pane id in the faint colour (ends in `base`).
+/// Name, pin mark, the auto-compaction-off mark, and the pane id in the faint colour (ends in `base`).
 fn label_with_pin(a: &Agent, pinned: bool, base: &str) -> String {
-    let name = if pinned { format!("{} {}", a.label(), PIN) } else { a.label() };
+    let mut name = a.label();
+    if pinned {
+        name = format!("{} {}", name, PIN);
+    }
+    if a.compaction_off {
+        name = format!("{} {}", name, faint(NO_COMPACT, base));
+    }
     format!("{} {}", name, faint(&a.pane, base))
 }
 
