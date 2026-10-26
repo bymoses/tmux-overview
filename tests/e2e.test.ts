@@ -1089,16 +1089,17 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     f.sendRunnerKey("l");
     await f.waitUntil("worker under orchestrator", () => f.runnerContains("\u2500 \u25cf w1"));
     // Pane id after the name; the bg jobs it waits for after its state.
-    // \u2298 after the name: its auto-compaction is off (pi-kit's /compaction off).
-    expect(f.captureRunner()).toContain(`w1 \u2298 ${w1}`);
+    expect(f.captureRunner()).toContain(`w1 ${w1}`);
     expect(f.captureRunner()).toMatch(/working \S* ?\u26992/);
-    // Shown, w1 marks itself while the context column is off.
-    expect(f.captureRunner()).toMatch(/working \S* ?\u26992 \u25b2/);
+    // Context column off: w1's context marks follow its state (\u25b2 full, \u2298 auto-compaction off).
+    expect(f.captureRunner()).toMatch(/working \S* ?\u26992 \u25b2 \u2298/);
 
     // `c` adds the context column, red from 350k tokens; saved.
     expect(f.captureRunner()).not.toContain("874k/1M");
     f.sendRunnerKey("c");
     await f.waitUntil("context column", () => f.runnerContains("874k/1M"));
+    // \u2298 right of the tokens: pi-kit's /compaction off.
+    expect(f.captureRunner()).toContain("874k/1M \u2298");
     // tmux writes bold + colour as one SGR or two (`1;38;5;203m` or `1m\e[38;5;203m`), by what came before.
     expect(f.captureRunnerAnsi()).toMatch(/1(;|m\x1b\[)38;5;203m874k\/1M/);
     expect(readFileSync(join(f.cache, "tmux-overview", "agents-context"), "utf8").trim()).toBe("1");

@@ -531,15 +531,9 @@ fn faint(s: &str, base: &str) -> String {
     format!("\x1b[0m{}{}\x1b[0m{}", FAINT, s, base)
 }
 
-/// Name, pin mark, the auto-compaction-off mark, and the pane id in the faint colour (ends in `base`).
+/// Name, pin mark, and the pane id in the faint colour (ends in `base`).
 fn label_with_pin(a: &Agent, pinned: bool, base: &str) -> String {
-    let mut name = a.label();
-    if pinned {
-        name = format!("{} {}", name, PIN);
-    }
-    if a.compaction_off {
-        name = format!("{} {}", name, faint(NO_COMPACT, base));
-    }
+    let name = if pinned { format!("{} {}", a.label(), PIN) } else { a.label() };
     format!("{} {}", name, faint(&a.pane, base))
 }
 
@@ -570,15 +564,24 @@ fn row_text(row: &ARow, agents: &[Agent], name_w: usize, show_ctx: bool) -> (Str
             // Tree lines and fold arrows recede.
             let head = format!("{}{} {}", faint(prefix, base), tint(a.dot()), label_with_pin(a, *pinned, base));
             let pad = name_w.saturating_sub(text_width(&head));
-            // With the context column off, a full context still shows as " \u{25b2}" after the state.
             let state = state_text(a);
-            let mark = if !show_ctx && a.ctx_full() { format!(" \x1b[0m{}{}\x1b[0m{}", ERROR, FULL_MARK, base) } else { String::new() };
-            let pad_w = 15usize.saturating_sub(text_width(&state) + if mark.is_empty() { 0 } else { 2 });
+            // Context column off: the context marks follow the state instead (\u{25b2} full, \u{2298} auto-compaction off).
+            let mut mark = String::new();
+            if !show_ctx && a.ctx_full() {
+                mark.push_str(&format!(" \x1b[0m{}{}\x1b[0m{}", ERROR, FULL_MARK, base));
+            }
+            if !show_ctx && a.compaction_off {
+                mark.push_str(&format!(" {}", faint(NO_COMPACT, base)));
+            }
+            let pad_w = 15usize.saturating_sub(text_width(&state) + text_width(&mark));
             let state = format!("{}{}{}", tint(&state), mark, " ".repeat(pad_w));
             // Optional context column (`c`), fixed width so the child counts stay aligned.
             let state = if show_ctx {
                 let (t, colour) = ctx_text(a);
-                format!("{}\x1b[0m{}{}\x1b[0m{}{}", state, colour, t, base, " ".repeat(9usize.saturating_sub(text_width(&t))))
+                // `255k/1M \u{2298}`: auto-compaction is off for this session.
+                let off = if a.compaction_off { format!(" {}", faint(NO_COMPACT, base)) } else { String::new() };
+                let w = text_width(&t) + if off.is_empty() { 0 } else { 2 };
+                format!("{}\x1b[0m{}{}\x1b[0m{}{}{}", state, colour, t, base, off, " ".repeat(11usize.saturating_sub(w)))
             } else {
                 state
             };
