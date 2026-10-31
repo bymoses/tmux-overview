@@ -129,7 +129,9 @@ impl Agent {
     }
 
     fn dot(&self) -> &'static str {
-        if self.errored() {
+        if self.state == "dozing" {
+            "󰒲"
+        } else if self.errored() {
             "\u{2717}"
         } else if self.waiting() {
             "\u{25d0}"
@@ -141,7 +143,9 @@ impl Agent {
     }
 
     fn colour(&self) -> &'static str {
-        if self.errored() {
+        if self.state == "dozing" {
+            DIM
+        } else if self.errored() {
             ERROR
         } else if self.finished() {
             FINISHED
@@ -893,5 +897,22 @@ pub(crate) fn run<A, B>(
             },
             _ => dirty = false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dozing_uses_dim_sleep_glyph_even_with_a_bell() {
+        let a = Agent {
+            pane: String::new(), session: String::new(), window_index: String::new(),
+            window_name: String::new(), state: "dozing".into(), state_at: 0,
+            parent: String::new(), name: String::new(), bell: true, session_file: String::new(),
+            bg: 0, error: String::new(), ctx_tokens: None, ctx_window: 0, compaction_off: false,
+        };
+        assert_eq!(a.dot(), "󰒲");
+        assert_eq!(a.colour(), DIM);
     }
 }
