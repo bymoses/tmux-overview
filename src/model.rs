@@ -52,24 +52,30 @@ pub(crate) struct Window {
     pub(crate) alert: Option<AgentAlert>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct SavedPane {
     pub(crate) index: String,
     pub(crate) active: bool,
     pub(crate) cwd: String,
     pub(crate) command: String,
+    pub(crate) id: String,
+    pub(crate) pi_session: String,
+    pub(crate) parent: String,
+    pub(crate) worker: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct SavedWindow {
     pub(crate) index: String,
     pub(crate) name: String,
     pub(crate) active: bool,
     pub(crate) layout: String,
+    pub(crate) width: String,
+    pub(crate) height: String,
     pub(crate) panes: Vec<SavedPane>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct SavedSession {
     pub(crate) name: String,
     pub(crate) default_path: String,
@@ -80,6 +86,8 @@ pub(crate) struct SavedSession {
 #[derive(Clone)]
 pub(crate) enum Row {
     WatchHeader,
+    LayoutsHeader,
+    Layout(crate::layouts::Layout),
     WatchWindow(Window),
     Session(Session),
     Window(Window),
@@ -91,6 +99,7 @@ pub(crate) enum ConfirmAction {
     KillSession { target: String, name: String },
     KillWindow { target: String, name: String },
     DeleteSaved { name: String },
+    DeleteLayout { path: String },
     /// Switch the client to a helper session (`__agents`, `__float`) after a yes.
     Switch { target: String },
 }

@@ -229,11 +229,16 @@ pub(crate) fn load_rows(
             rows.push(Row::SavedSession(saved.clone()));
         }
     }
+    let layouts = crate::layouts::load_layouts();
+    if !layouts.is_empty() {
+        rows.push(Row::LayoutsHeader);
+        rows.extend(layouts.into_iter().map(Row::Layout));
+    }
     rows
 }
 
 pub(crate) fn is_selectable(row: &Row) -> bool {
-    !matches!(row, Row::WatchHeader)
+    !matches!(row, Row::WatchHeader | Row::LayoutsHeader)
 }
 
 pub(crate) fn clamp_selected(selected: &mut usize, rows: &[Row]) {
@@ -336,6 +341,8 @@ pub(crate) fn reload_saved_rows_clamped(
 pub(crate) fn row_key(row: &Row) -> String {
     match row {
         Row::WatchHeader => "watch-header".to_string(),
+        Row::LayoutsHeader => "layouts-header".to_string(),
+        Row::Layout(l) => format!("layout\t{}", l.path),
         Row::WatchWindow(w) | Row::Window(w) => format!("window\t{}", w.id),
         Row::Session(s) => format!("session\t{}", s.id),
         Row::SavedSession(s) => format!("saved\t{}", s.name),
@@ -350,7 +357,8 @@ pub(crate) fn selected_index_for_key(rows: &[Row], key: &str) -> Option<usize> {
 
 pub(crate) fn row_target(row: &Row) -> &str {
     match row {
-        Row::WatchHeader => "",
+        Row::WatchHeader | Row::LayoutsHeader => "",
+        Row::Layout(l) => &l.path,
         Row::Session(s) => &s.id,
         Row::WatchWindow(w) | Row::Window(w) => &w.id,
         Row::SavedSession(s) => &s.name,
@@ -361,7 +369,7 @@ pub(crate) fn session_from_row(row: &Row) -> Option<(String, String)> {
     match row {
         Row::Session(s) => Some((s.id.clone(), s.name.clone())),
         Row::WatchWindow(w) | Row::Window(w) => Some((w.session_id.clone(), w.session_name.clone())),
-        Row::WatchHeader | Row::SavedSession(_) => None,
+        Row::WatchHeader | Row::LayoutsHeader | Row::Layout(_) | Row::SavedSession(_) => None,
     }
 }
 
@@ -384,7 +392,7 @@ pub(crate) fn default_path_for_row(row: &Row) -> String {
 
 pub(crate) fn rename_modal_for(row: &Row) -> Modal {
     match row {
-        Row::WatchHeader => Modal::None,
+        Row::WatchHeader | Row::LayoutsHeader | Row::Layout(_) => Modal::None,
         Row::Session(s) => Modal::Input {
             title: format!("rename session {}", s.name),
             value: s.name.clone(),
@@ -432,7 +440,7 @@ pub(crate) fn add_modal_for(row: &Row) -> Modal {
     let session = session_from_row(row);
     let cwd = match row {
         Row::SavedSession(s) => s.default_path.clone(),
-        Row::WatchHeader => tmux(&["display-message", "-p", "#{pane_current_path}"])
+        Row::WatchHeader | Row::LayoutsHeader | Row::Layout(_) => tmux(&["display-message", "-p", "#{pane_current_path}"])
             .unwrap_or_default()
             .trim()
             .to_string(),
@@ -454,7 +462,11 @@ pub(crate) fn add_modal_for(row: &Row) -> Modal {
 
 pub(crate) fn delete_modal_for(row: &Row) -> Modal {
     match row {
-        Row::WatchHeader => Modal::None,
+        Row::WatchHeader | Row::LayoutsHeader => Modal::None,
+        Row::Layout(l) => Modal::Confirm {
+            title: format!("delete layout {}?", l.label),
+            action: ConfirmAction::DeleteLayout { path: l.path.clone() },
+        },
         Row::SavedSession(s) => Modal::Confirm {
             title: format!("delete saved session {}?", s.name),
             action: ConfirmAction::DeleteSaved { name: s.name.clone() },

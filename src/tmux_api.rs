@@ -1,8 +1,22 @@
 use std::io;
 use std::process::Command;
+use std::sync::OnceLock;
+
+static SERVER: OnceLock<String> = OnceLock::new();
+
+pub(crate) fn set_server(server: String) { let _ = SERVER.set(server); }
+
+fn command() -> Command {
+    let mut cmd = Command::new("tmux");
+    if let Some(server) = SERVER.get() { cmd.args([if server.starts_with('/') { "-S" } else { "-L" }, server]); }
+    cmd
+}
 
 pub(crate) fn tmux(args: &[&str]) -> io::Result<String> {
-    let output = Command::new("tmux").args(args).output()?;
+    let output = command().args(args).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_string()));
+    }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
@@ -14,7 +28,7 @@ pub(crate) fn server_start_time() -> String {
 }
 
 pub(crate) fn tmux_status_ok(args: &[&str]) -> bool {
-    Command::new("tmux")
+    command()
         .args(args)
         .status()
         .map(|s| s.success())
@@ -22,5 +36,5 @@ pub(crate) fn tmux_status_ok(args: &[&str]) -> bool {
 }
 
 pub(crate) fn tmux_status_ignore(args: &[&str]) {
-    let _ = Command::new("tmux").args(args).status();
+    let _ = command().args(args).status();
 }

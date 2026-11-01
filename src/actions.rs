@@ -116,6 +116,10 @@ pub(crate) fn perform_confirm_action(action: ConfirmAction) -> Result<String, St
                 Err(format!("failed to delete window {}", name))
             }
         }
+        ConfirmAction::DeleteLayout { path } => {
+            fs::remove_file(path).map_err(|e| e.to_string())?;
+            Ok("deleted layout".into())
+        }
         ConfirmAction::DeleteSaved { name } => {
             delete_saved_session(&name)?;
             Ok(format!("deleted saved {}", name))

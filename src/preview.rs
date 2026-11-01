@@ -294,7 +294,15 @@ pub(crate) fn active_window_for_session(session_id: &str) -> Option<String> {
 
 pub(crate) fn preview_for_row(row: &Row, width: usize, height: usize) -> Vec<String> {
     match row {
-        Row::WatchHeader => Vec::new(),
+        Row::WatchHeader | Row::LayoutsHeader => Vec::new(),
+        Row::Layout(l) => {
+            let mut lines = vec![format!("Layout: {}", l.label), format!("{} panes · {} sessions", l.panes, l.sessions.len()),
+                "Enter restores missing sessions; existing sessions are untouched.".into(), String::new()];
+            for s in &l.sessions {
+                lines.push(format!("{} · {} windows", s.name, s.windows.len()));
+            }
+            lines.into_iter().take(height).map(|s| plain_truncate(&s, width)).collect()
+        },
         Row::WatchWindow(w) | Row::Window(w) => window_preview(&w.id, width, height),
         Row::Session(s) => match active_window_for_session(&s.id) {
             Some(window_id) => window_preview(&window_id, width, height),

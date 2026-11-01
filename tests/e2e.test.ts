@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -15,11 +15,9 @@ import { tmpdir } from "node:os";
 // is never mutated by this suite.
 
 const REPO_DIR = resolve(import.meta.dir, "..");
-const SRC = join(REPO_DIR, "src/main.rs");
 const TMP_ROOT = mkdtempSync(join(tmpdir(), "tmux-overview-e2e."));
-const BUILD_DIR = join(TMP_ROOT, "build");
+const BUILD_DIR = join(TMP_ROOT, "build", "tmux-overview");
 const BIN = join(BUILD_DIR, "tmux-overview");
-const RUST_IMAGE = process.env.TMUX_OVERVIEW_RUST_IMAGE ?? "rust:1-alpine";
 const OVERVIEW_W = process.env.TMUX_OVERVIEW_E2E_WIDTH ?? "120";
 const OVERVIEW_H = process.env.TMUX_OVERVIEW_E2E_HEIGHT ?? "34";
 const TEST_TIMEOUT_MS = 30_000;
@@ -69,30 +67,7 @@ function sleep(ms: number): Promise<void> {
 function buildOverview(): void {
   mkdirSync(BUILD_DIR, { recursive: true });
 
-  if (commandExists("rustc")) {
-    const built = run(["rustc", "-C", "debuginfo=0", SRC, "-o", BIN]);
-    expect(built.exitCode, built.stderr).toBe(0);
-    return;
-  }
-
-  const built = run([
-    "docker",
-    "run",
-    "--rm",
-    "-v",
-    `${REPO_DIR}:/src:ro`,
-    "-v",
-    `${BUILD_DIR}:/out`,
-    "-w",
-    "/src",
-    RUST_IMAGE,
-    "rustc",
-    "-C",
-    "debuginfo=0",
-    "/src/src/main.rs",
-    "-o",
-    "/out/tmux-overview",
-  ]);
+  const built = run(["make", "-C", REPO_DIR, "build"], { XDG_CACHE_HOME: dirname(BUILD_DIR) });
   expect(built.exitCode, built.stderr).toBe(0);
 }
 
@@ -395,7 +370,7 @@ e2e("navigation, preview resize, and preview toggle", async () => {
     expect(readFileSync(previewStateFile, "utf8").trim()).toBe("65");
     f.sendRunnerKey("?");
     await f.waitUntil("help modal", () => f.runnerContains("tmux overview help"));
-    expect(f.captureRunner()).toContain("S save layout");
+    expect(f.captureRunner()).toContain("S save session");
     f.sendRunnerKey("C-m");
     await f.waitUntil("help modal closed", () => f.runnerLacks("tmux overview help"));
 
@@ -807,6 +782,29 @@ e2e("saved session snapshots can be restored", async () => {
     expect(f.windowNames(session)).toContain(first);
     expect(f.windowNames(session)).toContain(second);
     expect(f.tmux(["show-option", "-qv", "-t", session, "@overview_default_path"]).stdout.trim()).toBe(defaultPath);
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("Layouts section saves whole server, restores missing sessions, and deletes a snapshot", async () => {
+  await withFixture("layouts_popup", async (f) => {
+    const session = `alpha_layout_${process.pid}`;
+    await f.createSessionWithOutput(session, "layout-window", "LAYOUT_PREVIEW");
+    await f.launchOverview();
+    f.sendRunnerKey("L");
+    const dir = join(f.state, "tmux-overview", "layouts");
+    await f.waitUntil("whole layout saved", () => existsSync(dir) && readdirSync(dir).length === 1);
+    const snapshot = join(dir, readdirSync(dir)[0]);
+    await f.waitUntil("Layouts section visible", () => f.runnerContains("Layouts"));
+    await f.quitOverview();
+    expect(f.tmux(["kill-session", "-t", session]).exitCode).toBe(0);
+    await f.launchOverview();
+    f.sendRunnerKey("G", "C-m");
+    await f.waitUntil("missing layout session restored", () => f.tmux(["has-session", "-t", session]).exitCode === 0);
+    expect(f.windowNames(session)).toContain("layout-window");
+    f.sendRunnerKey("G", "D");
+    await f.waitUntil("delete layout modal", () => f.runnerContains("delete layout"));
+    f.sendRunnerKey("y");
+    await f.waitUntil("layout deleted", () => !existsSync(snapshot));
   });
 }, TEST_TIMEOUT_MS);
 

@@ -7,14 +7,9 @@ case "${1:-}" in
     build_only=true
     shift
     ;;
-  "") ;;
-  *)
-    printf 'usage: %s [--build-only]\n' "$0" >&2
-    exit 2
-    ;;
 esac
-if (( $# > 0 )); then
-  printf 'usage: %s [--build-only]\n' "$0" >&2
+if [[ "$build_only" == true ]] && (( $# > 0 )); then
+  printf 'usage: %s [--build-only | [--server socket] [save-all | restore [snapshot] [--fork]]]\n' "$0" >&2
   exit 2
 fi
 
@@ -79,4 +74,4 @@ if [[ "$build_only" == true ]]; then
   exit 0
 fi
 
-exec "$bin"
+exec "$bin" "$@"

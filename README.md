@@ -86,6 +86,42 @@ only ring the bell still light up if their command is a known agent (`pi`,
 - Press `t` to toggle tree connectors.
 - Hidden-session visibility, tree view, and stats mode persist across overview openings.
 
+## Layouts
+
+`S` saves the selected session; `L` saves the whole server. The **Layouts** section
+shows saved times and pane counts. Enter restores missing sessions without touching
+existing ones; `D` deletes a selected snapshot. Background `__bg` sessions are excluded.
+
+```sh
+./tmux-overview.sh save-all
+./tmux-overview.sh restore                    # newest snapshot, or legacy import
+./tmux-overview.sh restore /path/snapshot.tsv
+./tmux-overview.sh --server isolated restore /path/snapshot.tsv --fork
+```
+
+`--server` accepts a tmux `-L` socket name or an absolute `-S` socket path.
+Snapshots live in `${XDG_STATE_HOME:-$HOME/.local/state}/tmux-overview/layouts/`:
+newest 20 plus the newest snapshot per UTC day for seven days. Writes are atomic.
+Single-session saves use the same pi-aware v2 format in `sessions/`; old v1 saves
+and `~/.local/state/tmux-snapshot.tsv` remain readable without modification.
+
+Pi panes restore through pi-kit's `bin/pi-doze-start.sh`, without starting pi.
+`PI_DOZE_START` overrides its path. Enter or an inbox message wakes the saved
+conversation; `--fork` makes the first wake fork it instead. Worker parent pane
+ids are remapped after all panes exist. Missing/already-open pi logs get a shell,
+never an empty conversation. Old v1 saves cannot recover pi conversation identity.
+Missing cwds fall back to the nearest existing parent (then `$HOME`).
+`nvim`/`yazi` relaunch; other programs get a shell. `PI_*` identity is scrubbed.
+
+The opt-in real-snapshot test uses a separate socket/runtime, forks on wake,
+and removes its test server/runtime/fork afterwards:
+
+```sh
+systemd-run --user --scope -p MemoryMax=4G -p TasksMax=500 -p CPUQuota=300% \
+  env TMUX_OVERVIEW_REAL_SNAPSHOT="$HOME/.local/state/tmux-snapshot.tsv" \
+  bun test tests/restore-real.test.ts
+```
+
 ## Build/run
 
 Use the Makefile so builds go through the same wrapper used at runtime. The wrapper writes the binary to `${XDG_CACHE_HOME:-$HOME/.cache}/tmux-overview/tmux-overview` when sources change:

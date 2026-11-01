@@ -182,6 +182,9 @@ pub(crate) fn row_parts(
     show_tree: bool,
 ) -> (String, String, String, Vec<String>, bool) {
     match row {
+        Row::LayoutsHeader => ("Layouts".into(), String::new(), String::new(), Vec::new(), false),
+        Row::Layout(l) => (format!("󰆓 {}", l.label), String::new(), String::new(),
+            vec![format!("{} panes · {} sessions", l.panes, l.sessions.len())], false),
         Row::WatchHeader => (
             "󰈈  watchlist".to_string(),
             String::new(),
@@ -307,7 +310,7 @@ pub(crate) fn row_stats(row: &Row) -> ProcStats {
     match row {
         Row::Session(s) => s.stats.clone(),
         Row::WatchWindow(w) | Row::Window(w) => w.stats.clone(),
-        Row::WatchHeader | Row::SavedSession(_) => ProcStats::default(),
+        Row::WatchHeader | Row::LayoutsHeader | Row::Layout(_) | Row::SavedSession(_) => ProcStats::default(),
     }
 }
 
@@ -341,7 +344,7 @@ pub(crate) fn help_modal() -> Modal {
             "a add window/session".to_string(),
             "w watch/unwatch window".to_string(),
             "r rename, R reload".to_string(),
-            "S save layout".to_string(),
+            "S save session · L save all".to_string(),
             "K kill session".to_string(),
             "D delete row".to_string(),
             "c default path".to_string(),
@@ -528,7 +531,7 @@ pub(crate) fn render(
         "w watch".to_string(),
         "r rename".to_string(),
         "R reload".to_string(),
-        "S save layout".to_string(),
+        "S save session · L save all".to_string(),
         "K kill session".to_string(),
         "D delete row".to_string(),
         "c path".to_string(),
@@ -565,12 +568,12 @@ pub(crate) fn render(
                 out.push_str("\x1b[0m");
             } else {
                 match rows[idx] {
-                    Row::WatchHeader => out.push_str("\x1b[1;38;5;240m "),
+                    Row::WatchHeader | Row::LayoutsHeader => out.push_str("\x1b[1;38;5;240m "),
                     Row::Session(ref s) if is_bg_session(&s.name) => out.push_str(&format!("{} ", BG_COLOR)),
                     Row::Session(_) => out.push_str(&format!("{} ", SESSION_COLOR)),
                     Row::Window(ref w) if is_bg_session(&w.session_name) => out.push_str(&format!("{} ", BG_COLOR)),
                     Row::WatchWindow(_) | Row::Window(_) => out.push_str("\x1b[38;5;244m "),
-                    Row::SavedSession(_) => out.push_str("\x1b[38;5;240m "),
+                    Row::SavedSession(_) | Row::Layout(_) => out.push_str("\x1b[38;5;240m "),
                 }
                 out.push_str(&visible_truncate_ansi(&text, content_w));
                 let visible_w = text_width(&text).min(content_w);

@@ -226,7 +226,7 @@ pub(crate) fn run() -> io::Result<()> {
                 let collapse_session = rows.get(selected).and_then(|row| match row {
                     Row::Session(s) => Some(s.name.clone()),
                     Row::WatchWindow(w) | Row::Window(w) => Some(w.session_name.clone()),
-                    Row::WatchHeader | Row::SavedSession(_) => None,
+                    Row::WatchHeader | Row::LayoutsHeader | Row::Layout(_) | Row::SavedSession(_) => None,
                 });
                 if let Some(session_name) = collapse_session {
                     expanded.insert(session_name.clone(), false);
@@ -336,6 +336,14 @@ pub(crate) fn run() -> io::Result<()> {
                     dirty = true;
                 }
             }
+            b"L" => {
+                message = match crate::layouts::save_all() {
+                    Ok(l) => format!("saved layout · {} panes", l.panes),
+                    Err(e) => format!("save failed: {}", e),
+                };
+                reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
+                dirty = true;
+            }
             b"S" => {
                 let session_to_save = rows.get(selected).and_then(|row| match row {
                     Row::Session(s) => Some(s.clone()),
@@ -350,7 +358,7 @@ pub(crate) fn run() -> io::Result<()> {
                         stats: ProcStats::default(),
                         alerts: 0,
                     }),
-                    Row::WatchHeader | Row::SavedSession(_) => None,
+                    Row::WatchHeader | Row::LayoutsHeader | Row::Layout(_) | Row::SavedSession(_) => None,
                 });
                 if let Some(session) = session_to_save {
                     match save_session_snapshot(&session) {
@@ -423,7 +431,15 @@ pub(crate) fn run() -> io::Result<()> {
             b"\r" | b"\n" => {
                 if let Some(row) = rows.get(selected) {
                     match row {
-                        Row::WatchHeader => {}
+                        Row::WatchHeader | Row::LayoutsHeader => {}
+                        Row::Layout(layout) => {
+                            message = match crate::layouts::restore(&layout.sessions, false) {
+                                Ok(report) => report.message(),
+                                Err(e) => format!("restore failed: {}", e),
+                            };
+                            reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
+                            dirty = true;
+                        }
                         Row::SavedSession(saved) => match restore_saved_session(&saved) {
                             Ok(()) => break,
                             Err(e) => {
