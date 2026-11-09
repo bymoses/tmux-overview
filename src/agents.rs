@@ -143,8 +143,9 @@ impl Agent {
     }
 
     fn colour(&self) -> &'static str {
+        // An unseen finish outlives the doze: the 💤 turns the finished colour, as the project does.
         if self.state == "dozing" {
-            DIM
+            if self.finished() { FINISHED } else { DIM }
         } else if self.errored() {
             ERROR
         } else if self.finished() {
