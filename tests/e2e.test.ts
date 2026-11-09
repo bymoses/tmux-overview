@@ -1023,6 +1023,54 @@ e2e("unreviewed agent panes badge their window and roll up to the session", asyn
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("space toggles agent highlights and remains text in input modals", async () => {
+  await withFixture("space_alert", async (f) => {
+    const session = `alpha_space_${process.pid}`;
+    await f.createSessionWithOutput(session, "agent", "SPACE_AGENT");
+    const pane = `${session}:agent.0`;
+    const other = `zz_space_${process.pid}`;
+    await f.createSessionWithOutput(other, "other", "OTHER_AGENT");
+    f.tmux(["set-option", "-p", "-t", `${other}:other.0`, "@agent_kind", "pi"]);
+    f.tmux(["set-option", "-p", "-t", `${other}:other.0`, "@agent_state", "idle"]);
+    for (const [key, value] of [["@agent_kind", "pi"], ["@agent_state", "idle"], ["@agent_unseen", "1"]]) {
+      expect(f.tmux(["set-option", "-p", "-t", pane, key, value]).exitCode).toBe(0);
+    }
+    f.tmux(["send-keys", "-l", "-t", pane, "printf '\\a'"]);
+    f.tmux(["send-keys", "-t", pane, "C-m"]);
+    await f.waitUntil("bell", () => f.tmux(["display-message", "-p", "-t", pane, "#{window_bell_flag}"]).stdout.trim() === "1");
+    await f.launchOverview();
+    await f.waitUntil("session badge", () => f.runnerContains("● 1"));
+    f.sendRunnerKey("A");
+    await f.waitUntil("agents view", () => f.runnerContains("A overview"));
+    const projectPink = () => (f.captureRunnerAnsi().split("\n").find((line) => line.includes(session)) ?? "").includes("38;2;255;100;150");
+    f.sendRunnerKey("g", "j");
+    await f.waitUntil("project pink", projectPink);
+    f.sendRunnerKey("g", "l", "j", "Space");
+    await f.waitUntil("unseen cleared", () => f.tmux(["show-option", "-pqv", "-t", pane, "@agent_unseen"]).stdout.trim() === "");
+    f.sendRunnerKey("k");
+    await f.waitUntil("agent no longer pink", () => !(f.captureRunnerAnsi().split("\n").find((line) => line.includes("●") && line.includes("agent")) ?? "").includes("38;2;255;100;150"));
+    f.sendRunnerKey("h", "j");
+    await f.waitUntil("project no longer pink", () => !projectPink());
+    f.sendRunnerKey("A");
+    await f.waitUntil("session badge cleared", () => f.runnerLacks("● 1"));
+    f.sendRunnerKey("A");
+    await f.waitUntil("agents view again", () => f.runnerContains("A overview"));
+    f.sendRunnerKey("g", "l", "j", "Space");
+    await f.waitUntil("manually marked", () => f.tmux(["show-option", "-pqv", "-t", pane, "@agent_marked"]).stdout.trim() === "1");
+    f.sendRunnerKey("k");
+    await f.waitUntil("marked agent pink", () => (f.captureRunnerAnsi().split("\n").find((line) => line.includes("●") && line.includes("agent")) ?? "").includes("38;2;255;100;150"));
+    f.sendRunnerKey("h", "j");
+    await f.waitUntil("marked project pink", projectPink);
+    f.sendRunnerKey("A");
+    await f.waitUntil("manual badge", () => f.runnerContains("● 1"));
+    f.sendRunnerKey("g", "r");
+    await f.waitUntil("rename input", () => f.runnerContains(`rename session ${session}`));
+    f.sendRunnerLiteral(" x");
+    await f.waitUntil("space typed", () => f.runnerContains(`${session} x`));
+    f.sendRunnerKey("Escape");
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("agents mode: spawn tree, folding, compact counts, pins and project order", async () => {
   await withFixture("agents_mode", async (f) => {
     const first = `ag_${process.pid}`;

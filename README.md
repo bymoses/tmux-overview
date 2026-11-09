@@ -62,9 +62,9 @@ in the picker: `● 4m` on the window row (`◌` when the agent exited, `●2` w
 two panes stopped), and `● N` on every ancestor session row, so a collapsed or
 `__`-hidden `__agents` session still surfaces its pending work.
 
-The "not reviewed yet" part is tmux's own bookkeeping rather than extra state:
-a producer rings the terminal bell when it stops, and `window_bell_flag` stays
-set until the window is focused. A pane counts as an agent when it publishes
+A producer rings the terminal bell when it stops, and `window_bell_flag` stays
+set until the window is focused. Space can also manually mark or clear an alert
+without switching windows; viewing the window clears the manual mark. A pane counts as an agent when it publishes
 `@agent_state` (`idle`, `exited`, `blocked`, `working`) as a tmux pane option:
 
 ```sh
@@ -78,6 +78,10 @@ only ring the bell still light up if their command is a known agent (`pi`,
 `claude`, `codex`, `aider`), so producers need no integration at all.
 
 ## Session naming and keys
+
+| Key | Action |
+| --- | --- |
+| Space | Toggle unseen on an agent or window; clear a project or session subtree |
 
 - `parent/child` appears beneath a live `parent` session; each level folds independently.
 - Components beginning with `__` are hidden by default. Press `.` to toggle them; legacy symbol-marked helpers remain recognized.

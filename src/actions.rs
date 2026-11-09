@@ -7,6 +7,32 @@ use crate::model::{ConfirmAction, InputAction, Modal, ModalKeyResult};
 use crate::saved::{delete_saved_session, rename_saved_session};
 use crate::tmux_api::{tmux, tmux_status_ignore, tmux_status_ok};
 
+/// Toggle pane alerts without changing the active window. Groups only clear.
+pub(crate) fn toggle_unseen(pane: Option<&str>, window: Option<&str>, session: Option<&str>, group: bool) {
+    let raw = tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{window_id}\t#{session_name}\t#{window_bell_flag}\t#{@agent_unseen}\t#{@agent_marked}\t#{@agent_kind}\t#{@agent_dismissed}\t#{pane_modal_flag}\t#{@agent_state}\t#{pane_current_command}"]).unwrap_or_default();
+    let candidates: Vec<Vec<&str>> = raw.lines().map(|line| line.split('\t').collect()).filter(|p: &Vec<&str>| {
+        p.len() >= 11 && p[8] != "1"
+            && pane.map_or(true, |id| p[0] == id)
+            && window.map_or(true, |id| p[1] == id)
+            && session.map_or(true, |name| p[2] == name || p[2].strip_prefix(name).map_or(false, |suffix| suffix.starts_with('/')))
+            && (p[9] == "idle" || p[9] == "exited" || p[9] == "blocked" || p[9] == "error" || (p[9].is_empty() && ["pi", "claude", "codex", "aider"].contains(&p[10])))
+    }).collect();
+    let highlighted = |p: &Vec<&str>| p[5] == "1" || (p[3] == "1" && (p[4] == "1" || (p[6].is_empty() && p[7] != "1")));
+    let clearing = candidates.iter().any(highlighted);
+    for p in candidates {
+        if clearing && highlighted(&p) {
+            tmux_status_ignore(&["set-option", "-p", "-u", "-t", p[0], "@agent_unseen"]);
+            tmux_status_ignore(&["set-option", "-p", "-u", "-t", p[0], "@agent_marked"]);
+            if p[6].is_empty() {
+                tmux_status_ignore(&["set-option", "-p", "-t", p[0], "@agent_dismissed", "1"]);
+            }
+        } else if !clearing && !group {
+            tmux_status_ignore(&["set-option", "-p", "-t", p[0], "@agent_unseen", "1"]);
+            tmux_status_ignore(&["set-option", "-p", "-t", p[0], "@agent_marked", "1"]);
+        }
+    }
+}
+
 fn expand_home(value: &str) -> String {
     if value == "~" || value.starts_with("~/") {
         if let Some(home) = env::var_os("HOME") {

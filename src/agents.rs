@@ -166,7 +166,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
         "list-panes",
         "-a",
         "-F",
-        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}\t#{@agent_error}\t#{@agent_ctx}\t#{@agent_compaction}",
+        "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_name}\t#{@agent_kind}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_parent}\t#{pane_dead}\t#{window_bell_flag}\t#{@agent_name}\t#{@pi_session}\t#{@agent_unseen}\t#{@agent_bg}\t#{@agent_error}\t#{@agent_ctx}\t#{@agent_compaction}\t#{@agent_marked}",
     ])
     .unwrap_or_default();
     raw.lines()
@@ -183,7 +183,7 @@ pub(crate) fn collect_agents() -> Vec<Agent> {
                 state: if p[5].is_empty() { "starting".to_string() } else { p[5].to_string() },
                 state_at: p[6].parse().unwrap_or(0),
                 parent: p[7].to_string(),
-                bell: p[9] == "1" && p[12] == "1",
+                bell: (p[9] == "1" && p[12] == "1") || p.get(17) == Some(&"1"),
                 name: p[10].to_string(),
                 session_file: p[11].to_string(),
                 bg: p[13].parse().unwrap_or(0),
@@ -676,7 +676,7 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
     for y in 0..body_h {
         let content_w = list_w.saturating_sub(1);
         if y + 1 == body_h {
-            let hint = " A overview · enter go · h/l fold · p pin · J/K order · c context · v preview · +/- width · q quit";
+            let hint = " A overview · enter go · h/l fold · space unseen · p pin · J/K order · c context · v preview · +/- width · q quit";
             match confirm {
                 Some(session) => {
                     let ask = format!(" go to {}?  y/enter yes \u{b7} any other key no", crate::util::session_display_name(session));
@@ -818,9 +818,19 @@ pub(crate) fn run<A, B>(
             }
             b"+" | b"=" => list_percent = (list_percent + 5).min(70),
             b"-" | b"_" => list_percent = list_percent.saturating_sub(5).max(20),
-            b" " | b"l" | [0x1b, b'[', b'C'] | b"h" | [0x1b, b'[', b'D'] => {
+            b" " => {
+                match rows.get(selected) {
+                    Some(ARow::Agent { idx, .. }) => crate::actions::toggle_unseen(Some(&agents[*idx].pane), None, None, false),
+                    Some(ARow::Project { name, .. }) => crate::actions::toggle_unseen(None, None, Some(name), true),
+                    None => {}
+                }
+                let key = rows.get(selected).map(|r| r.key(&agents));
+                agents = collect_agents();
+                rows = rows_for(&agents, expanded, &pins, &order);
+                if let Some(i) = key.and_then(|k| select_key(&rows, &agents, &k)) { selected = i; }
+            }
+            b"l" | [0x1b, b'[', b'C'] | b"h" | [0x1b, b'[', b'D'] => {
                 let open = match key.as_slice() {
-                    b" " => None,
                     b"l" | [0x1b, b'[', b'C'] => Some(true),
                     _ => Some(false),
                 };

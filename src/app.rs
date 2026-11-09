@@ -206,13 +206,14 @@ pub(crate) fn run() -> io::Result<()> {
                 dirty = true;
             }
             b" " => {
-                if let Some(Row::Session(s)) = rows.get(selected) {
-                    let now = crate::util::session_is_expanded(&expanded, &s.name);
-                    expanded.insert(s.name.clone(), !now);
-                    save_expanded_state(&expanded);
-                    reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
-                    dirty = true;
+                match rows.get(selected) {
+                    Some(Row::Session(s)) => crate::actions::toggle_unseen(None, None, Some(&s.name), true),
+                    Some(Row::Window(w) | Row::WatchWindow(w)) => crate::actions::toggle_unseen(None, Some(&w.id), None, false),
+                    _ => {}
                 }
+                window_labels = collect_pane_snapshot();
+                reload_rows_into(&mut rows, &expanded, &watchlist, &session_stats, &window_stats, &window_labels, &saved_sessions, show_hidden);
+                dirty = true;
             }
             b"l" | [0x1b, b'[', b'C'] => {
                 if let Some(Row::Session(s)) = rows.get(selected) {
