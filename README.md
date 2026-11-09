@@ -77,6 +77,16 @@ printf '\a' > /dev/tty
 only ring the bell still light up if their command is a known agent (`pi`,
 `claude`, `codex`, `aider`), so producers need no integration at all.
 
+## Subscription limits (agents mode)
+
+`A` shows pi agents and a bottom line with each account's cached limits.
+`7d 79/43 ↻3d24h` means 79% used, 43% elapsed (linear use), and time to reset.
+Colours match pi-kit's status line; observations older than 30 minutes are dim with `?`.
+At narrow widths reset times yield first, keeping all accounts visible.
+Caches are read from `${XDG_RUNTIME_DIR:-/tmp}/pi-usage/` (`PI_USAGE_CACHE_DIR` overrides).
+`pi-kit usage --poll` runs in the background at most every five minutes; it must be on `PATH`.
+Set `TMUX_OVERVIEW_USAGE_POLL=off` for cache-only operation. Missing caches hide the line.
+
 ## Session naming and keys
 
 | Key | Action |

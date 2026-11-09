@@ -650,7 +650,8 @@ fn preview_lines(row: Option<&ARow>, agents: &[Agent], w: usize, h: usize) -> Ve
 fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, show_ctx: bool, list_percent: usize, confirm: Option<&str>) -> io::Result<()> {
     let (h, w) = term_size();
     let body_h = h.max(4);
-    let list_h = body_h.saturating_sub(1);
+    let limits = crate::subscriptions::line(w.saturating_sub(1));
+    let list_h = body_h.saturating_sub(1 + usize::from(limits.is_some()));
     let list_w = if show_preview { (w * list_percent / 100).clamp(30, w.saturating_sub(21).max(30)) } else { w };
     let preview_w = w.saturating_sub(list_w + 1);
 
@@ -674,6 +675,14 @@ fn render(rows: &[ARow], agents: &[Agent], selected: usize, show_preview: bool, 
     let offset = selected.saturating_sub(list_h.saturating_sub(scrolloff + 1));
     let mut out = String::from("\x1b[?2026h\x1b[H");
     for y in 0..body_h {
+        // Limits span both columns, directly above the existing key hints.
+        if y + 2 == body_h {
+            if let Some(line) = &limits {
+                out.push_str(&ansi_fit(&format!(" {line}"), w));
+                out.push_str("\x1b[K\r\n");
+                continue;
+            }
+        }
         let content_w = list_w.saturating_sub(1);
         if y + 1 == body_h {
             let hint = " A overview · enter go · h/l fold · space unseen · p pin · J/K order · c context · v preview · +/- width · q quit";
@@ -758,6 +767,7 @@ pub(crate) fn run<A, B>(
     let mut confirm: Option<(String, String)> = None;
 
     loop {
+        crate::subscriptions::poll_if_due();
         while drain_a.try_recv().is_ok() {}
         while drain_b.try_recv().is_ok() {}
         if last_refresh.elapsed().as_millis() >= REFRESH_MS {

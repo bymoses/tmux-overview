@@ -92,6 +92,8 @@ class Fixture {
   readonly state: string;
   readonly socket: string;
   readonly runnerSession: string;
+  readonly usage: string;
+  extraEnv: Record<string, string> = {};
   runnerPane = "";
 
   constructor(slug: string) {
@@ -102,6 +104,7 @@ class Fixture {
     this.state = join(this.testTmp, "xdg-state");
     this.socket = join(this.testTmp, "tmux.sock");
     this.runnerSession = `runner_${this.slug}`;
+    this.usage = join(this.testTmp, "usage");
   }
 
   tmux(args: string[]): CmdResult {
@@ -220,6 +223,9 @@ class Fixture {
       `TMUX_OVERVIEW_HEIGHT=${shQuote(OVERVIEW_H)}`,
       "TMUX_OVERVIEW_STATS_INTERVAL=60",
       "TMUX_OVERVIEW_TITLE_INTERVAL_MS=5000",
+      `PI_USAGE_CACHE_DIR=${shQuote(this.usage)}`,
+      "TMUX_OVERVIEW_USAGE_POLL=off",
+      ...Object.entries(this.extraEnv).map(([key, value]) => `${key}=${shQuote(value)}`),
       shQuote(BIN),
     ].join(" ");
     this.sendRunnerKey(cmd, "C-m");
@@ -1184,6 +1190,76 @@ e2e("agents mode: spawn tree, folding, compact counts, pins and project order", 
     await f.waitUntil("agents mode closed", () => f.runnerLacks("A overview"));
     await f.launchOverview("A overview");
     await f.waitUntil("selection restored", () => selected().includes("orch"));
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("agents subscription limits: account colours, linear use, stale, malformed and missing caches", async () => {
+  await withFixture("subscription_limits", async (f) => {
+    const now = Math.floor(Date.now() / 1000);
+    expect(f.tmux(["resize-window", "-t", `${f.runnerSession}:overview`, "-x", "180", "-y", OVERVIEW_H]).exitCode).toBe(0);
+    f.extraEnv = { TMUX_OVERVIEW_WIDTH: "180" };
+    const write = (name: string, account: string, windows: unknown[], extra = {}) => {
+      mkdirSync(f.usage, { recursive: true });
+      writeFileSync(join(f.usage, name), JSON.stringify({ fetchedAt: now * 1000, account, windows, limitReached: false, ...extra }));
+    };
+    const win = (label: string, used: number, seconds: number, remaining: number) => ({ label, used_percent: used, limit_window_seconds: seconds, reset_at: now + remaining });
+    write("anthropic.json", "main", [win("5h", 12, 18000, 9000), win("7d", 79, 604800, 344736)]);
+    write("anthropic-dgt.json", "dgt", [win("7d", 95, 604800, 120)], { limitReached: true });
+    write("openai-codex.json", "main", [win("7d", 67, 604800, 172800)]);
+    await f.launchOverview(); f.sendRunnerKey("A");
+    await f.waitUntil("subscription line", () => f.runnerContains("claude main") && f.runnerContains("codex"));
+    const lines = f.captureRunner().trimEnd().split("\n");
+    expect(lines.at(-2)).toContain("claude main"); expect(lines.at(-1)).toContain("A overview");
+    const line = lines.at(-2)!;
+    expect(line).toContain("5h 12/50"); expect(line).toContain("7d 79/43"); expect(line).toContain("7d 95/100"); expect(line).toContain("7d 67/71");
+    expect(line).toContain("↻2h30m"); expect(line).toContain("↻3d24h"); expect(line).toContain("↻2d");
+    const ansi = f.captureRunnerAnsi();
+    expect(ansi).toMatch(/\x1b\[38;5;244m[^\x1b]*5h 12\/50/);
+    expect(ansi).toMatch(/\x1b\[38;5;179m7d 79\/43/);
+    expect(ansi).toMatch(/\x1b\[38;5;203m7d 95\/100/);
+    expect(ansi).toContain("limit");
+    // Above-linear is amber even below 70%, exactly like pi-kit's status line.
+    write("anthropic.json", "main", [win("5h", 12, 18000, 17900)]);
+    await f.waitUntil("above linear amber", () => /\x1b\[38;5;179m5h 12\/1/.test(f.captureRunnerAnsi()));
+    write("anthropic-dgt.json", "dgt", [win("7d", 95, 604800, 120)], { fetchedAt: (now - 1801) * 1000, limitReached: true });
+    await f.waitUntil("stale marker", () => f.runnerContains("claude dgt ?"));
+    expect(f.captureRunnerAnsi()).toMatch(/\x1b\[38;5;244m[^\x1b]*7d 95\/100/);
+    // Invalid windows and hostile labels cannot move the cursor or show NaN.
+    writeFileSync(join(f.usage, "anthropic-bad.json"), '{"fetchedAt":1,"windows":[}');
+    writeFileSync(join(f.usage, "openai-codex-bad.json"), "null");
+    rmSync(join(f.usage, "anthropic.json")); rmSync(join(f.usage, "anthropic-dgt.json")); rmSync(join(f.usage, "openai-codex.json"));
+    await f.waitUntil("missing caches hidden", () => f.runnerLacks("claude main") && f.runnerLacks("codex"));
+    expect(f.captureRunner().trimEnd().split("\n").at(-1)).toContain("A overview");
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("narrow agents footer keeps every account and omits reset times first", async () => {
+  await withFixture("subscription_narrow", async (f) => {
+    mkdirSync(f.usage); f.extraEnv = { TMUX_OVERVIEW_WIDTH: "78" };
+    expect(f.tmux(["resize-window", "-t", `${f.runnerSession}:overview`, "-x", "78", "-y", OVERVIEW_H]).exitCode).toBe(0);
+    const now = Date.now();
+    for (const [file, account] of [["anthropic.json", "main"], ["anthropic-dgt.json", "dgt"], ["openai-codex.json", "main"]]) {
+      writeFileSync(join(f.usage, file), JSON.stringify({ fetchedAt: now, account, windows: [{ label: "7d", used_percent: 79, limit_window_seconds: 604800, reset_at: Math.floor(now / 1000) + 344736 }] }));
+    }
+    await f.launchOverview("preview"); f.sendRunnerKey("A");
+    await f.waitUntil("three narrow accounts", () => f.runnerContains("claude main") && f.runnerContains("claude dgt") && f.runnerContains("codex"));
+    const line = f.captureRunner().trimEnd().split("\n").at(-2)!;
+    expect(line.match(/79\/43/g)).toHaveLength(3); expect(line).not.toContain("↻");
+    expect(f.captureRunner().trimEnd().split("\n").at(-1)).toContain("A overview");
+  });
+}, TEST_TIMEOUT_MS);
+
+e2e("agents subscription polling is asynchronous and throttled across mode toggles", async () => {
+  await withFixture("subscription_poll", async (f) => {
+    const bin = join(f.testTmp, "bin"), calls = join(f.testTmp, "poll-calls"); mkdirSync(bin);
+    writeFileSync(join(bin, "pi-kit"), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${shQuote(calls)}\n`, { mode: 0o755 });
+    f.extraEnv = { PATH: `${bin}:${process.env.PATH}`, TMUX_OVERVIEW_USAGE_POLL: "on" };
+    await f.launchOverview(); f.sendRunnerKey("A");
+    await f.waitUntil("background poll ran", () => existsSync(calls));
+    expect(readFileSync(calls, "utf8")).toBe("usage --poll\n");
+    f.sendRunnerKey("A"); await f.waitUntil("back to overview", () => f.runnerContains("tmux overview"));
+    f.sendRunnerKey("A"); await f.waitUntil("agents after toggle", () => f.runnerContains("A overview"));
+    expect(readFileSync(calls, "utf8")).toBe("usage --poll\n");
   });
 }, TEST_TIMEOUT_MS);
 

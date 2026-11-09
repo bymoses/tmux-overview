@@ -3,6 +3,8 @@ mod agents;
 mod app;
 mod model;
 mod layouts;
+mod json;
+mod subscriptions;
 mod preview;
 mod render;
 mod rows;
