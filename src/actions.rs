@@ -15,7 +15,7 @@ pub(crate) fn toggle_unseen(pane: Option<&str>, window: Option<&str>, session: O
             && pane.map_or(true, |id| p[0] == id)
             && window.map_or(true, |id| p[1] == id)
             && session.map_or(true, |name| p[2] == name || p[2].strip_prefix(name).map_or(false, |suffix| suffix.starts_with('/')))
-            && (p[9] == "idle" || p[9] == "exited" || p[9] == "blocked" || p[9] == "error" || (p[9].is_empty() && ["pi", "claude", "codex", "aider"].contains(&p[10])))
+            && (p[9] == "idle" || p[9] == "dozing" || p[9] == "exited" || p[9] == "blocked" || p[9] == "error" || (p[9].is_empty() && ["pi", "claude", "codex", "aider"].contains(&p[10])))
     }).collect();
     let highlighted = |p: &Vec<&str>| p[5] == "1" || (p[3] == "1" && (p[4] == "1" || (p[6].is_empty() && p[7] != "1")));
     let clearing = candidates.iter().any(highlighted);

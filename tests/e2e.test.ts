@@ -1068,6 +1068,13 @@ e2e("space toggles agent highlights and remains text in input modals", async () 
     f.sendRunnerLiteral(" x");
     await f.waitUntil("space typed", () => f.runnerContains(`${session} x`));
     f.sendRunnerKey("Escape");
+    // A dozing agent clears the same way, without waking it.
+    f.tmux(["set-option", "-p", "-t", pane, "@agent_state", "dozing"]);
+    await f.waitUntil("rename closed", () => f.runnerLacks("rename session"));
+    f.sendRunnerKey("A");
+    await f.waitUntil("agents view for dozing", () => f.runnerContains("A overview"));
+    f.sendRunnerKey("g", "l", "j", "Space");
+    await f.waitUntil("dozing mark cleared", () => f.tmux(["show-option", "-pqv", "-t", pane, "@agent_marked"]).stdout.trim() === "");
   });
 }, TEST_TIMEOUT_MS);
 
