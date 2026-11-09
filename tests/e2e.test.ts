@@ -1206,7 +1206,7 @@ e2e("agents subscription limits: account colours, linear use, stale, malformed a
     write("anthropic.json", "main", [win("5h", 12, 18000, 9000), win("7d", 79, 604800, 344736)]);
     write("anthropic-dgt.json", "dgt", [win("7d", 95, 604800, 120)], { limitReached: true });
     write("openai-codex.json", "main", [win("7d", 67, 604800, 172800)]);
-    await f.launchOverview(); f.sendRunnerKey("A");
+    await f.launchOverview(); f.sendRunnerKey("A", "v");
     await f.waitUntil("subscription line", () => f.runnerContains("claude main") && f.runnerContains("codex"));
     const lines = f.captureRunner().trimEnd().split("\n");
     expect(lines.at(-2)).toContain("claude main"); expect(lines.at(-1)).toContain("A overview");
@@ -1233,6 +1233,31 @@ e2e("agents subscription limits: account colours, linear use, stale, malformed a
   });
 }, TEST_TIMEOUT_MS);
 
+e2e("agents limits leave the last three preview rows intact", async () => {
+  await withFixture("limits_preview", async (f) => {
+    mkdirSync(f.usage);
+    writeFileSync(join(f.usage, "anthropic.json"), JSON.stringify({ fetchedAt: Date.now(), account: "main", windows: [{ label: "7d", used_percent: 42, limit_window_seconds: 604800, reset_at: Math.floor(Date.now() / 1000) + 300000 }] }));
+    const session = `preview_${process.pid}`;
+    await f.createSessionWithOutput(session, "agent", "READY");
+    const pane = `${session}:agent.0`;
+    expect(f.tmux(["set-option", "-p", "-t", pane, "@agent_kind", "pi"]).exitCode).toBe(0);
+    expect(f.tmux(["set-option", "-p", "-t", pane, "@agent_state", "idle"]).exitCode).toBe(0);
+    const height = Number(f.tmux(["display-message", "-p", "-t", pane, "#{pane_height}"]).stdout.trim());
+    f.tmux(["send-keys", "-l", "-t", pane, `printf '\\033[2J\\033[${height - 2};1HFOOTER_ONE\\033[${height - 1};1HFOOTER_TWO\\033[${height};1HFOOTER_THREE'; exec tail -f /dev/null`]);
+    f.tmux(["send-keys", "-t", pane, "C-m"]);
+    await f.waitUntil("fixture footer", () => f.paneContains(pane, "FOOTER_THREE"));
+    await f.launchOverview(); f.sendRunnerKey("A");
+    await f.waitUntil("agent project", () => f.runnerContains(session));
+    f.sendRunnerKey("l", "j");
+    await f.waitUntil("agent preview", () => f.runnerContains("FOOTER_ONE"));
+    const lines = f.captureRunner().trimEnd().split("\n");
+    expect(lines.at(-3)).toContain("FOOTER_ONE");
+    expect(lines.at(-2)).toContain("claude main");
+    expect(lines.at(-2)).toContain("FOOTER_TWO");
+    expect(lines.at(-1)).toContain("FOOTER_THREE");
+  });
+}, TEST_TIMEOUT_MS);
+
 e2e("narrow agents footer keeps every account and omits reset times first", async () => {
   await withFixture("subscription_narrow", async (f) => {
     mkdirSync(f.usage); f.extraEnv = { TMUX_OVERVIEW_WIDTH: "78" };
@@ -1241,7 +1266,7 @@ e2e("narrow agents footer keeps every account and omits reset times first", asyn
     for (const [file, account] of [["anthropic.json", "main"], ["anthropic-dgt.json", "dgt"], ["openai-codex.json", "main"]]) {
       writeFileSync(join(f.usage, file), JSON.stringify({ fetchedAt: now, account, windows: [{ label: "7d", used_percent: 79, limit_window_seconds: 604800, reset_at: Math.floor(now / 1000) + 344736 }] }));
     }
-    await f.launchOverview("preview"); f.sendRunnerKey("A");
+    await f.launchOverview("preview"); f.sendRunnerKey("A", "v");
     await f.waitUntil("three narrow accounts", () => f.runnerContains("claude main") && f.runnerContains("claude dgt") && f.runnerContains("codex"));
     const line = f.captureRunner().trimEnd().split("\n").at(-2)!;
     expect(line.match(/79\/43/g)).toHaveLength(3); expect(line).not.toContain("↻");
